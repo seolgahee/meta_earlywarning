@@ -80,21 +80,22 @@ OPP_FILTER = {
 }
 
 # action_type 분기 조건 (우선순위: CAMPAIGN_SCALE > PRODUCT_EXTRACTION > CREATIVE_EXPANSION)
+# ASC 통합 구조 기준: ad_id 단위 개별 예산 증액 불가 → 캠페인 일cap/일예산 조정만 가능
 ACTION_CONDITIONS = {
     "CAMPAIGN_SCALE": {
         "roas_6h_min":      3.0,   # 300%
         "purchases_6h_min": 5,
-        "guide": "ASC 캠페인 일예산 10~15% 증액 검토",
+        "guide": "ASC 통합 구조상 개별 소재 예산 증액은 불가하므로, 캠페인 일cap 또는 일예산 상향을 검토하세요.",
     },
     "PRODUCT_EXTRACTION": {
         "roas_6h_min":  3.0,       # 300%
         "spend_6h_min": 100_000,
-        "guide": "해당 상품 분리 후 별도 ASC 테스트 캠페인 운영 권장",
+        "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
     "CREATIVE_EXPANSION": {
         "roas_6h_min":      2.5,   # 250%
         "purchases_6h_min": 2,
-        "guide": "동일 상품 기반 신규 소재 2~3종 제작 권장",
+        "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
 }
 
@@ -143,6 +144,21 @@ def determine_action_type(roas_6h: float, spend_6h: float, purchases_6h: float) 
     if roas_6h >= c["CREATIVE_EXPANSION"]["roas_6h_min"] and purchases_6h >= c["CREATIVE_EXPANSION"]["purchases_6h_min"]:
         return "CREATIVE_EXPANSION"
     return None
+
+
+def determine_alert_subtype(ctr_6h: float, ctr_12h: float, purchases_6h: float,
+                             roas_6h: float, roas_12h: float) -> str:
+    """
+    alert 성격 분류 (액션 가이드 분기 기준)
+    CLICK_SURGE:      CTR_6h > CTR_12h 이고 구매 증가가 약한 경우 (purchases_6h < 5)
+    CONVERSION_SURGE: purchases_6h >= 3 이고 roas_6h > roas_12h
+    DEFAULT:          위 조건에 해당하지 않는 경우
+    """
+    if ctr_6h > ctr_12h and purchases_6h < 5:
+        return "CLICK_SURGE"
+    if purchases_6h >= 3 and roas_6h > roas_12h:
+        return "CONVERSION_SURGE"
+    return "DEFAULT"
 
 
 # ─────────────────────────────────────────
@@ -199,57 +215,79 @@ def mark_alert_sent(ad_id: str) -> None:
 # ─────────────────────────────────────────
 # Gemini AI 인사이트
 # ─────────────────────────────────────────
+# FALLBACK은 alert_subtype 기준으로 분기 (ASC 구조 전제)
 FALLBACK = {
-    "CAMPAIGN_SCALE":    ("6시간 기준 ROAS 및 구매 건수가 기준치를 상회하며 예산 확장 구간으로 판단됩니다.",
-                          "ASC 캠페인 일예산 10~15% 증액 검토를 권장합니다."),
-    "PRODUCT_EXTRACTION": ("해당 소재의 소진 및 ROAS가 기준치를 초과하여 상품 분리 테스트 구간으로 판단됩니다.",
-                            "동일 상품으로 별도 ASC 테스트 캠페인 운영을 권장합니다."),
-    "CREATIVE_EXPANSION": ("해당 소재의 전환 반응이 확대되는 구간으로 소재 확장 필요성이 감지됩니다.",
-                            "동일 상품 기반 신규 소재 2~3종 제작을 권장합니다."),
+    "CLICK_SURGE": (
+        "클릭 반응이 급증한 소재로 유입 효율은 개선되고 있으나 전환 추이는 추가 관찰이 필요합니다.",
+        "클릭 반응이 급증한 소재이므로 즉시 예산 증액보다 추가 관찰이 우선입니다. "
+        "해당 소재의 상품 및 썸네일 구성을 기준으로 신규 유입형 소재 제작을 권장합니다.",
+    ),
+    "CONVERSION_SURGE": (
+        "전환 효율이 6시간 기준으로 급증하며 ROAS 개선이 확인되는 구간입니다.",
+        "전환 효율이 급증한 구간이므로 ASC 캠페인 일cap 상향을 검토하세요. "
+        "해당 소재 내 상품을 기준으로 전환형 신규 소재 2~3종 추가 제작을 권장합니다.",
+    ),
+    "DEFAULT": (
+        "해당 소재의 6시간 성과가 기준치를 초과하여 기회 구간으로 판단됩니다.",
+        "ASC 통합 구조상 개별 소재 예산 증액은 불가하므로, 캠페인 일cap 상향을 검토하고 "
+        "해당 소재 내 상품으로 신규 소재 2~3종 추가 제작을 권장합니다.",
+    ),
 }
 
 
 def generate_ai_insight(alert: dict) -> tuple[str, str]:
-    action_type = alert["action_type"]
-    fallback    = FALLBACK.get(action_type, FALLBACK["CREATIVE_EXPANSION"])
+    action_type   = alert["action_type"]
+    alert_subtype = alert.get("alert_subtype", "DEFAULT")
+    fallback      = FALLBACK.get(alert_subtype, FALLBACK["DEFAULT"])
 
     if not _gemini_client:
         return fallback
 
-    action_context = {
-        "CAMPAIGN_SCALE":    "예산 확장 구간 판단 근거를 설명하고, ASC 일예산 증액의 적절성을 짧게 서술하세요.",
-        "PRODUCT_EXTRACTION": "상품 분리 테스트가 필요한 근거를 데이터 기반으로 설명하세요.",
-        "CREATIVE_EXPANSION": "소재 확장이 필요한 근거를 전환 데이터 기반으로 설명하세요.",
+    # subtype별 Gemini 작성 지침
+    subtype_context = {
+        "CLICK_SURGE": (
+            "AI 인사이트: CTR이 12시간 대비 급등한 이유를 소재/상품 관점에서 해석하세요. "
+            "ACTION 가이드: 즉시 예산 증액보다 추가 관찰이 우선임을 전제로, 해당 소재의 상품·썸네일 구성 기반 신규 유입형 소재 제작을 안내하세요."
+        ),
+        "CONVERSION_SURGE": (
+            "AI 인사이트: 구매 전환과 ROAS가 6시간 기준으로 급증한 이유를 데이터 기반으로 해석하세요. "
+            "ACTION 가이드: ASC 캠페인 일cap 상향 검토와 해당 소재 내 상품 기반 전환형 신규 소재 2~3종 제작을 안내하세요."
+        ),
+        "DEFAULT": (
+            "AI 인사이트: 성과 개선 요인을 데이터 기반으로 해석하세요. "
+            "ACTION 가이드: ASC 통합 구조(개별 소재 예산 증액 불가) 기준으로 운영 액션을 안내하세요."
+        ),
     }
 
     prompt = f"""
 당신은 디지털 광고 퍼포먼스 마케터입니다.
-아래 Meta 광고 데이터를 보고 AI 인사이트와 액션 가이드를 각각 한 문장으로 작성하세요.
+아래 Meta 광고 데이터를 보고 AI 인사이트(왜 반응이 좋아졌는지 해석)와 액션 가이드(운영자가 당장 해야 할 행동)를 각각 작성하세요.
 
 [광고 정보]
 - 캠페인: {alert['campaign_name']}
 - 광고세트: {alert['adset_name']}
 - 광고소재: {alert['ad_name']}
 - 채널: {alert['channel']}
-- action_type: {action_type}
+- alert 유형: {alert_subtype} / {action_type}
 
-[최근 6시간 성과]
+[성과 데이터]
 - Spend_6h: {alert['spend_6h']:,.0f}원
+- Clicks_6h: {int(alert.get('clicks_6h', 0))}회
 - Purchases_6h: {int(alert['purchases_6h'])}건
 - Revenue_6h: {alert['revenue_6h']:,.0f}원
-- ROAS_6h: {alert['roas_6h']:.1%}
-- ROAS_12h: {alert['roas_12h']:.1%}
-- CTR_6h: {alert.get('ctr_6h', 0):.2%}
+- ROAS_6h: {alert['roas_6h']:.1%} / ROAS_12h: {alert['roas_12h']:.1%}
+- CTR_6h: {alert.get('ctr_6h', 0):.2%} / CTR_12h: {alert.get('ctr_12h', 0):.2%}
 
 [작성 지침]
-- {action_context.get(action_type, '')}
+- {subtype_context.get(alert_subtype, subtype_context['DEFAULT'])}
+- AI_INSIGHT는 "왜" 반응이 좋아졌는지 한 문장으로 해석
+- ACTION_GUIDE는 운영자가 "무엇을" 해야 하는지 한~두 문장으로 구체적 지시
 - 입력 데이터만 근거로 해석, 외부 요인 추정 금지
-- purchases_6h > 0, revenue_6h > 0인 경우에만 긍정적 인사이트 허용
 - 숫자 과장 금지, 한국어, 짧고 실무적인 톤
 
 [출력 형식] (반드시 아래 형식 그대로)
 AI_INSIGHT: (한 문장)
-ACTION_GUIDE: (한 문장)
+ACTION_GUIDE: (한~두 문장)
 """.strip()
 
     try:
@@ -291,21 +329,51 @@ def build_email_html(alerts: list) -> str:
     blocks  = ""
 
     for a in alerts:
-        action_type  = a["action_type"]
-        color        = ACTION_TYPE_COLOR.get(action_type, "#1a73e8")
-        action_ko    = ACTION_TYPE_KO.get(action_type, action_type)
-        repeat_label = f"{a['repeat_count']}회" if a["repeat_count"] > 1 else "첫 발생"
+        action_type   = a["action_type"]
+        alert_subtype = a.get("alert_subtype", "DEFAULT")
+        color         = ACTION_TYPE_COLOR.get(action_type, "#1a73e8")
+        action_ko     = ACTION_TYPE_KO.get(action_type, action_type)
+        repeat_label  = f"{a['repeat_count']}회" if a["repeat_count"] > 1 else "첫 발생"
+
+        # 기준치 계산
+        roas_base   = ACTION_CONDITIONS[action_type]["roas_6h_min"]
+        purch_base  = ACTION_CONDITIONS[action_type].get("purchases_6h_min", OPP_FILTER["purchases_6h_min"])
+        roas_diff_pp  = (a["roas_6h"] - roas_base) * 100
+        purch_diff    = int(a["purchases_6h"]) - purch_base
+        ctr_6h        = a.get("ctr_6h", 0)
+        ctr_12h       = a.get("ctr_12h", 0)
+        ctr_diff_pp   = (ctr_6h - ctr_12h) * 100
+        clicks_6h     = int(a.get("clicks_6h", 0))
+
+        # alert_subtype 뱃지 텍스트
+        subtype_label = {
+            "CLICK_SURGE":      "클릭 급증형",
+            "CONVERSION_SURGE": "전환 급증형",
+            "DEFAULT":          "",
+        }.get(alert_subtype, "")
+        subtype_badge = (
+            f'<span style="background:#6c757d;color:#fff;padding:3px 8px;border-radius:4px;'
+            f'font-size:11px;font-weight:bold;margin-left:6px;">{subtype_label}</span>'
+            if subtype_label else ""
+        )
 
         blocks += f"""
         <div style="border:1px solid #e0e0e0;border-radius:8px;padding:20px;margin-bottom:24px;">
-          <div style="display:flex;align-items:center;margin-bottom:12px;">
+          <div style="display:flex;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:4px;">
             <span style="background:{color};color:#fff;padding:4px 10px;border-radius:4px;
-                         font-size:12px;font-weight:bold;margin-right:10px;">
-              {action_type}
-            </span>
-            <span style="color:#666;font-size:13px;">{action_ko}</span>
+                         font-size:12px;font-weight:bold;">{action_type}</span>
+            {subtype_badge}
+            <span style="color:#666;font-size:13px;margin-left:6px;">{action_ko}</span>
             <span style="margin-left:auto;color:#999;font-size:12px;">최근 7일 {repeat_label}</span>
           </div>
+
+          {(
+              '<div style="margin-bottom:14px;text-align:center;">'
+              f'<img src="{a["creative_image_url"]}" width="250" '
+              'style="max-width:100%;border-radius:6px;border:1px solid #e0e0e0;" '
+              'alt="소재 이미지" />'
+              '</div>'
+          ) if a.get("creative_image_url") else ""}
 
           <table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:12px;">
             <tr>
@@ -331,38 +399,83 @@ def build_email_html(alerts: list) -> str:
             <thead>
               <tr style="background:#f0f4ff;">
                 <th style="padding:6px 10px;border:1px solid #ddd;text-align:left;">지표</th>
-                <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">값</th>
+                <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">기준치</th>
+                <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">현재값</th>
+                <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">기준 대비</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td style="padding:6px 10px;border:1px solid #ddd;">Spend_6h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">100,000원</td>
                 <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{a['spend_6h']:,.0f}원</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#27ae60;font-weight:bold;">+{(a['spend_6h']/100_000-1)*100:.0f}%</td>
               </tr>
               <tr style="background:#f9f9f9;">
+                <td style="padding:6px 10px;border:1px solid #ddd;">Clicks_6h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{clicks_6h:,}회</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
+              </tr>
+              <tr>
                 <td style="padding:6px 10px;border:1px solid #ddd;">Purchases_6h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">{purch_base}건</td>
                 <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{int(a['purchases_6h'])}건</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#27ae60;font-weight:bold;">+{purch_diff}건</td>
               </tr>
-              <tr>
+              <tr style="background:#f9f9f9;">
                 <td style="padding:6px 10px;border:1px solid #ddd;">Revenue_6h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
                 <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{a['revenue_6h']:,.0f}원</td>
-              </tr>
-              <tr style="background:#f9f9f9;">
-                <td style="padding:6px 10px;border:1px solid #ddd;">ROAS_6h</td>
-                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:{color};font-weight:bold;">{a['roas_6h']:.1%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
               </tr>
               <tr>
-                <td style="padding:6px 10px;border:1px solid #ddd;">ROAS_12h</td>
-                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{a['roas_12h']:.1%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;">ROAS_6h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">{roas_base:.0%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:{color};font-weight:bold;">{a['roas_6h']:.1%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#27ae60;font-weight:bold;">+{roas_diff_pp:.0f}%p</td>
               </tr>
               <tr style="background:#f9f9f9;">
+                <td style="padding:6px 10px;border:1px solid #ddd;">ROAS_12h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{a['roas_12h']:.1%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
+              </tr>
+              <tr>
                 <td style="padding:6px 10px;border:1px solid #ddd;">CTR_6h</td>
-                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{a.get('ctr_6h', 0):.2%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">CTR_12h 기준</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{ctr_6h:.2%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:{'#27ae60' if ctr_diff_pp >= 0 else '#e74c3c'};font-weight:bold;">{'+' if ctr_diff_pp >= 0 else ''}{ctr_diff_pp:.1f}%p</td>
+              </tr>
+              <tr style="background:#f9f9f9;">
+                <td style="padding:6px 10px;border:1px solid #ddd;">CTR_12h</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{ctr_12h:.2%}</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">-</td>
               </tr>
             </tbody>
           </table>
 
-          <div style="margin-top:12px;padding:12px;background:#f0f7ff;border-left:4px solid {color};border-radius:4px;">
+          <div style="margin-top:12px;padding:12px;background:#f8f9fa;border:1px solid #dee2e6;border-radius:6px;">
+            <p style="margin:0 0 8px;font-size:12px;font-weight:bold;color:#495057;">기준 대비 상승폭</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#333;">
+              &#8226; ROAS: 기준 {roas_base:.0%} 대비
+              <strong style="color:{color};">+{roas_diff_pp:.0f}%p</strong>
+              ({a['roas_6h']:.1%} vs {roas_base:.0%})
+            </p>
+            <p style="margin:0 0 4px;font-size:13px;color:#333;">
+              &#8226; 구매건수: 기준 {purch_base}건 대비
+              <strong style="color:{color};">+{purch_diff}건</strong>
+              ({int(a['purchases_6h'])}건 vs {purch_base}건)
+            </p>
+            <p style="margin:0;font-size:13px;color:#333;">
+              &#8226; CTR: 12시간 대비
+              <strong style="color:{'#27ae60' if ctr_diff_pp >= 0 else '#e74c3c'};">{'+' if ctr_diff_pp >= 0 else ''}{ctr_diff_pp:.1f}%p</strong>
+              (CTR_6h: {ctr_6h:.2%} vs CTR_12h: {ctr_12h:.2%})
+            </p>
+          </div>
+
+          <div style="margin-top:10px;padding:12px;background:#f0f7ff;border-left:4px solid {color};border-radius:4px;">
             <p style="margin:0 0 4px;font-size:11px;color:#888;font-weight:bold;">AI 인사이트</p>
             <p style="margin:0;font-size:13px;color:#333;">{a['ai_insight']}</p>
           </div>
@@ -422,6 +535,52 @@ def send_alert_email(alerts: list) -> None:
 # ─────────────────────────────────────────
 # Meta API 호출
 # ─────────────────────────────────────────
+def fetch_creative_image(ad_id: str) -> str:
+    """
+    ad_id 기준으로 소재 이미지 URL 반환.
+    우선순위: thumbnail_url > image_url > image_hash → adimages API
+    조회 실패 또는 이미지 없으면 빈 문자열 반환.
+    """
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/{API_VERSION}/{ad_id}",
+            params={
+                "access_token": ACCESS_TOKEN,
+                "fields": "creative{thumbnail_url,image_url,image_hash}",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return ""
+        creative = resp.json().get("creative", {})
+
+        if creative.get("thumbnail_url"):
+            return creative["thumbnail_url"]
+        if creative.get("image_url"):
+            return creative["image_url"]
+
+        image_hash = creative.get("image_hash")
+        if image_hash:
+            img_resp = requests.get(
+                f"https://graph.facebook.com/{API_VERSION}/{AD_ACCOUNT_ID}/adimages",
+                params={
+                    "access_token": ACCESS_TOKEN,
+                    "hashes": image_hash,
+                    "fields": "url",
+                },
+                timeout=10,
+            )
+            if img_resp.status_code == 200:
+                data = img_resp.json().get("data", [])
+                if data and data[0].get("url"):
+                    return data[0]["url"]
+
+        return ""
+    except Exception as e:
+        print(f"[경고] creative 이미지 조회 실패 (ad_id: {ad_id}): {e}")
+        return ""
+
+
 def fetch_insights() -> list:
     url    = f"https://graph.facebook.com/{API_VERSION}/{AD_ACCOUNT_ID}/insights"
     params = {
@@ -637,27 +796,47 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
             if action_type is None:
                 action_type = "CREATIVE_EXPANSION"   # 게이트 통과 시 최소 분류
 
-            print(f"[{action_type}] {ad_info}")
+            _subtype_preview = determine_alert_subtype(
+                row["ctr_6h"], row["ctr_12h"],
+                row["purchases_6h"], row["roas_6h"], row["roas_12h"],
+            )
+            print(f"[{action_type}/{_subtype_preview}] {ad_info}")
             print(f"  roas_6h={row['roas_6h']:.1%}  spend_6h={row['spend_6h']:,.0f}원"
                   f"  purchases_6h={int(row['purchases_6h'])}건"
-                  f"  roas_12h={row['roas_12h']:.1%}  ctr_6h={row['ctr_6h']:.2%}")
+                  f"  roas_12h={row['roas_12h']:.1%}"
+                  f"  ctr_6h={row['ctr_6h']:.2%}  ctr_12h={row['ctr_12h']:.2%}")
 
             if not is_recently_alerted(row["AD_ID"]):
-                repeat_count = get_repeat_count(row["AD_ID"])
+                repeat_count  = get_repeat_count(row["AD_ID"])
+                alert_subtype = determine_alert_subtype(
+                    row["ctr_6h"], row["ctr_12h"],
+                    row["purchases_6h"], row["roas_6h"], row["roas_12h"],
+                )
+                print(f"  -> 소재 이미지 조회 중...")
+                creative_image_url = fetch_creative_image(row["AD_ID"])
+                if creative_image_url:
+                    print(f"  -> 이미지 확보: {creative_image_url[:60]}...")
+                else:
+                    print(f"  -> 이미지 없음 (파트너십 광고 또는 영상 소재)")
+
                 alert_data   = {
-                    "action_type":   action_type,
-                    "channel":       row.get("CHANNEL", "OFFICIAL"),
-                    "campaign_name": row["CAMPAIGN_NAME"],
-                    "adset_name":    row["ADSET_NAME"],
-                    "ad_name":       row["AD_NAME"],
-                    "ad_id":         row["AD_ID"],
-                    "roas_6h":       row["roas_6h"],
-                    "roas_12h":      row["roas_12h"],
-                    "spend_6h":      row["spend_6h"],
-                    "purchases_6h":  row["purchases_6h"],
-                    "revenue_6h":    row["revenue_6h"],
-                    "ctr_6h":        row["ctr_6h"],
-                    "repeat_count":  repeat_count,
+                    "action_type":        action_type,
+                    "alert_subtype":      alert_subtype,
+                    "channel":            row.get("CHANNEL", "OFFICIAL"),
+                    "campaign_name":      row["CAMPAIGN_NAME"],
+                    "adset_name":         row["ADSET_NAME"],
+                    "ad_name":            row["AD_NAME"],
+                    "ad_id":              row["AD_ID"],
+                    "roas_6h":            row["roas_6h"],
+                    "roas_12h":           row["roas_12h"],
+                    "spend_6h":           row["spend_6h"],
+                    "purchases_6h":       row["purchases_6h"],
+                    "revenue_6h":         row["revenue_6h"],
+                    "clicks_6h":          row["clicks_6h"],
+                    "ctr_6h":             row["ctr_6h"],
+                    "ctr_12h":            row["ctr_12h"],
+                    "repeat_count":       repeat_count,
+                    "creative_image_url": creative_image_url,
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
                 insight, guide = generate_ai_insight(alert_data)
