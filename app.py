@@ -43,8 +43,10 @@ SMTP_USER        = os.getenv("SMTP_USER")
 SMTP_PASSWORD    = os.getenv("SMTP_PASSWORD")
 ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
 BRAND          = "SERGIO_TACCHINI"
 ALERT_LOG_FILE = "alert_sent_log.json"
@@ -533,6 +535,86 @@ def send_alert_email(alerts: list) -> None:
 
 
 # ─────────────────────────────────────────
+# Slack 알림
+# ─────────────────────────────────────────
+def send_slack_alert(alerts: list) -> None:
+    if not SLACK_WEBHOOK_URL:
+        print("[경고] SLACK_WEBHOOK_URL 없음 - 슬랙 발송 건너뜀")
+        return
+
+    for a in alerts:
+        action_type   = a["action_type"]
+        alert_subtype = a.get("alert_subtype", "DEFAULT")
+        color         = ACTION_TYPE_COLOR.get(action_type, "#1a73e8")
+        action_ko     = ACTION_TYPE_KO.get(action_type, action_type)
+        repeat_label  = f"{a['repeat_count']}회" if a["repeat_count"] > 1 else "첫 발생"
+
+        roas_base    = ACTION_CONDITIONS[action_type]["roas_6h_min"]
+        purch_base   = ACTION_CONDITIONS[action_type].get("purchases_6h_min", OPP_FILTER["purchases_6h_min"])
+        roas_diff_pp = (a["roas_6h"] - roas_base) * 100
+        purch_diff   = int(a["purchases_6h"]) - purch_base
+        ctr_6h       = a.get("ctr_6h", 0)
+        ctr_12h      = a.get("ctr_12h", 0)
+        ctr_diff_pp  = (ctr_6h - ctr_12h) * 100
+
+        subtype_label = {"CLICK_SURGE": "클릭 급증형", "CONVERSION_SURGE": "전환 급증형"}.get(alert_subtype, "")
+        header_text   = f":mega: *Opportunity Alert* — {action_type}" + (f"  `{subtype_label}`" if subtype_label else "")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"Meta Ads Opportunity Alert · {BRAND}"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*분류*\n{action_ko}  ·  최근 7일 {repeat_label}"},
+                {"type": "mrkdwn", "text": f"*채널*\n{a['channel']}"},
+                {"type": "mrkdwn", "text": f"*Campaign*\n`{a['campaign_name']}`"},
+                {"type": "mrkdwn", "text": f"*Ad Set*\n`{a['adset_name']}`"},
+                {"type": "mrkdwn", "text": f"*Creative*\n`{a['ad_name']}`"},
+                {"type": "mrkdwn", "text": f"*Ad ID*\n`{a['ad_id']}`"},
+            ]},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*최근 6시간 성과*\n"
+                f"• Spend: *{a['spend_6h']:,.0f}원*\n"
+                f"• Clicks: *{int(a.get('clicks_6h', 0)):,}회*\n"
+                f"• Purchases: *{int(a['purchases_6h'])}건* (기준 {purch_base}건)\n"
+                f"• Revenue: *{a['revenue_6h']:,.0f}원*\n"
+                f"• ROAS_6h: *{a['roas_6h']:.1%}*  /  ROAS_12h: {a['roas_12h']:.1%}\n"
+                f"• CTR_6h: *{ctr_6h:.2%}*  /  CTR_12h: {ctr_12h:.2%}"
+            )}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*기준 대비 상승폭*\n"
+                f"• ROAS: 기준 {roas_base:.0%} 대비 *+{roas_diff_pp:.0f}%p*\n"
+                f"• 구매건수: 기준 {purch_base}건 대비 *+{purch_diff}건*\n"
+                f"• CTR: 12시간 대비 *{'+' if ctr_diff_pp >= 0 else ''}{ctr_diff_pp:.1f}%p*"
+            )}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f":bulb: *AI 인사이트*\n{a.get('ai_insight', '')}"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f":dart: *액션 가이드*\n{a.get('action_guide', '')}"}},
+        ]
+
+        # 소재 이미지가 있으면 상단에 추가
+        if a.get("creative_image_url"):
+            blocks.insert(2, {
+                "type": "image",
+                "image_url": a["creative_image_url"],
+                "alt_text": a["ad_name"],
+            })
+
+        try:
+            resp = requests.post(
+                SLACK_WEBHOOK_URL,
+                json={"blocks": blocks},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                print(f"[완료] 슬랙 발송 성공 -> {a['ad_name']}")
+            else:
+                print(f"[오류] 슬랙 발송 실패 (HTTP {resp.status_code}): {resp.text}")
+        except Exception as e:
+            print(f"[오류] 슬랙 발송 실패: {e}")
+
+
+# ─────────────────────────────────────────
 # Meta API 호출
 # ─────────────────────────────────────────
 def fetch_creative_image(ad_id: str) -> str:
@@ -862,6 +944,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
 
     if opp_alerts:
         send_alert_email(opp_alerts)
+        send_slack_alert(opp_alerts)
         for a in opp_alerts:
             mark_alert_sent(a["ad_id"])
 

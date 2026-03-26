@@ -60,4 +60,5 @@ jobs:
           ALERT_RECIPIENTS:   ${{ secrets.ALERT_RECIPIENTS }}
           GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL:       ${{ secrets.GEMINI_MODEL }}
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python app.py
