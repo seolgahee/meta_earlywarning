@@ -747,11 +747,15 @@ def send_slack_alert(alerts: list) -> None:
                 ]},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
-                    f"*최근 6시간 브랜딩 지표*\n"
-                    f"• Impressions: *{int(a.get('impressions_6h', 0)):,}회*\n"
-                    f"• Clicks: *{int(a.get('clicks_6h', 0)):,}회*\n"
-                    f"• CTR_6h: *{ctr_6h:.2%}*  /  CTR_12h: {ctr_12h:.2%}\n"
-                    f"• CTR 변화: *{'+' if ctr_diff_pp >= 0 else ''}{ctr_diff_pp:.1f}%p*"
+                    "*최근 6시간 브랜딩 지표*\n"
+                    "```\n"
+                    f"{'지표':<18} {'현재값':>10}  {'12h 대비':>10}\n"
+                    f"{'─'*42}\n"
+                    f"{'Impressions_6h':<18} {int(a.get('impressions_6h',0)):>9,}회  {'─':>10}\n"
+                    f"{'Clicks_6h':<18} {int(a.get('clicks_6h',0)):>9,}회  {'─':>10}\n"
+                    f"{'CTR_6h':<18} {ctr_6h:>9.2%}  {('+' if ctr_diff_pp>=0 else '')+f'{ctr_diff_pp:.1f}%p':>10}\n"
+                    f"{'CTR_12h':<18} {ctr_12h:>9.2%}  {'─':>10}\n"
+                    "```"
                 )}},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":bulb: *AI 인사이트*\n{a.get('ai_insight', '')}"}},
@@ -785,19 +789,19 @@ def send_slack_alert(alerts: list) -> None:
                 ]},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
-                    f"*최근 6시간 성과*\n"
-                    f"• Spend: *{a['spend_6h']:,.0f}원*\n"
-                    f"• Clicks: *{int(a.get('clicks_6h', 0)):,}회*\n"
-                    f"• Purchases: *{int(a['purchases_6h'])}건* (기준 {purch_base}건)\n"
-                    f"• Revenue: *{a['revenue_6h']:,.0f}원*\n"
-                    f"• ROAS_6h: *{a['roas_6h']:.1%}*  /  ROAS_12h: {a['roas_12h']:.1%}\n"
-                    f"• CTR_6h: *{ctr_6h:.2%}*  /  CTR_12h: {ctr_12h:.2%}"
-                )}},
-                {"type": "section", "text": {"type": "mrkdwn", "text": (
-                    f"*기준 대비 상승폭*\n"
-                    f"• ROAS: 기준 {roas_base:.0%} 대비 *+{roas_diff_pp:.0f}%p*\n"
-                    f"• 구매건수: 기준 {purch_base}건 대비 *+{purch_diff}건*\n"
-                    f"• CTR: 12시간 대비 *{'+' if ctr_diff_pp >= 0 else ''}{ctr_diff_pp:.1f}%p*"
+                    "*최근 6시간 성과*\n"
+                    "```\n"
+                    f"{'지표':<18} {'기준':>9}  {'현재값':>12}  {'대비':>10}\n"
+                    f"{'─'*55}\n"
+                    f"{'Spend_6h':<18} {'100,000원':>9}  {a['spend_6h']:>11,.0f}원  {'─':>10}\n"
+                    f"{'Clicks_6h':<18} {'─':>9}  {int(a.get('clicks_6h',0)):>11,}회  {'─':>10}\n"
+                    f"{'Purchases_6h':<18} {str(purch_base)+'건':>9}  {int(a['purchases_6h']):>11}건  {('+' if purch_diff>=0 else '')+str(purch_diff)+'건':>10}\n"
+                    f"{'Revenue_6h':<18} {'─':>9}  {a['revenue_6h']:>11,.0f}원  {'─':>10}\n"
+                    f"{'ROAS_6h':<18} {f'{roas_base:.0%}':>9}  {a['roas_6h']:>11.1%}  {('+' if roas_diff_pp>=0 else '')+f'{roas_diff_pp:.0f}%p':>10}\n"
+                    f"{'ROAS_12h':<18} {'─':>9}  {a['roas_12h']:>11.1%}  {'─':>10}\n"
+                    f"{'CTR_6h':<18} {'12h기준':>9}  {ctr_6h:>11.2%}  {('+' if ctr_diff_pp>=0 else '')+f'{ctr_diff_pp:.1f}%p':>10}\n"
+                    f"{'CTR_12h':<18} {'─':>9}  {ctr_12h:>11.2%}  {'─':>10}\n"
+                    "```"
                 )}},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":bulb: *AI 인사이트*\n{a.get('ai_insight', '')}"}},
