@@ -8,6 +8,7 @@ Meta Ads 조기경보 시스템
 import os
 import re
 import json
+import unicodedata
 import smtplib
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -76,10 +77,12 @@ def check_operating_hours() -> None:
 # ─────────────────────────────────────────
 # Opportunity 공통 필터
 OPP_FILTER = {
-    "purchases_6h_min": 3,
-    "spend_6h_min":     100_000,
-    "roas_6h_min":      3.0,   # 300%
-    # roas_6h >= roas_12h 는 코드에서 직접 비교
+    "purchases_6h_min":   5,
+    "spend_6h_min":       100_000,
+    "roas_6h_min":        3.0,   # 300%
+    "impressions_6h_min": 5_000,
+    "clicks_6h_min":      100,
+    # ctr_6h >= ctr_12h 는 코드에서 직접 비교
 }
 
 # action_type 분기 조건 (우선순위: CAMPAIGN_SCALE > PRODUCT_EXTRACTION > CREATIVE_EXPANSION)
@@ -118,6 +121,21 @@ KILL_CONDITION = {
 # ─────────────────────────────────────────
 # 유틸
 # ─────────────────────────────────────────
+def dw(s: str) -> int:
+    """터미널/슬랙 코드블록 기준 표시 너비 (CJK 2칸, 나머지 1칸)."""
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in str(s))
+
+
+def rjust_dw(s: str, width: int) -> str:
+    """display width 기준 우측 정렬 패딩."""
+    return " " * max(0, width - dw(s)) + str(s)
+
+
+def ljust_dw(s: str, width: int) -> str:
+    """display width 기준 좌측 정렬 패딩."""
+    return str(s) + " " * max(0, width - dw(s))
+
+
 def extract_purchase_count(actions: list) -> int:
     if not actions:
         return 0
@@ -162,18 +180,20 @@ def determine_alert_subtype(
     clicks_prev_6h: float = 0, roas_prev_6h: float = 0,
 ) -> str:
     """
-    alert 성격 분류 (액션 가이드 분기 기준)
+    alert 성격 분류 (전환 단계 기준)
     CONVERSION_SURGE_COLD: 최근 6h 전환 >= 5건, clicks >= 100, 직전 6h 전환 == 0건 (첫 발생)
     CONVERSION_SURGE:      최근 6h 전환 >= 5건, clicks >= 100, CVR/ROAS 모두 직전 6h 대비 개선
-    CLICK_SURGE:           CTR_6h > CTR_12h 이고 purchases_6h < 5
+    CONVERSION_EARLY:      1 <= 전환 < 5건, ROAS >= 기준치 (초기 전환 감지형)
+    CLICK_TO_CONVERT_GAP:  1 <= 전환 < 5건, CTR 상승 + ROAS < 기준치 (전환 미흡형)
+    CLICK_SURGE:           전환 0건, CTR_6h > CTR_12h (순수 클릭 반응형)
     DEFAULT:               위 조건에 해당하지 않는 경우
     """
-    enough_volume = purchases_6h >= 5 and clicks_6h >= 100
+    roas_threshold = OPP_FILTER["roas_6h_min"]
 
-    if enough_volume:
+    # purchases >= 5: Winner 판단
+    if purchases_6h >= 5 and clicks_6h >= 100:
         if purchases_prev_6h == 0:
             return "CONVERSION_SURGE_COLD"
-
         cvr_recent = purchases_6h      / clicks_6h      if clicks_6h      > 0 else 0
         cvr_prev   = purchases_prev_6h / clicks_prev_6h if clicks_prev_6h > 0 else 0
         if (
@@ -183,7 +203,15 @@ def determine_alert_subtype(
         ):
             return "CONVERSION_SURGE"
 
-    if ctr_6h > ctr_12h and purchases_6h < 5:
+    # purchases 1~4: 초기 전환 단계
+    if 1 <= purchases_6h < 5:
+        if roas_6h >= roas_threshold:
+            return "CONVERSION_EARLY"
+        if ctr_6h > ctr_12h:
+            return "CLICK_TO_CONVERT_GAP"
+
+    # purchases 0: 순수 클릭 반응
+    if purchases_6h == 0 and ctr_6h > ctr_12h:
         return "CLICK_SURGE"
 
     return "DEFAULT"
@@ -261,8 +289,16 @@ def mark_alert_sent(ad_id: str) -> None:
 FALLBACK = {
     # ── Performance 알럿 ──
     "CLICK_SURGE": (
-        "클릭 반응이 급증한 소재로 썸네일·카피 반응이 좋은 구간입니다.",
-        "이 소재의 썸네일·카피 컨셉을 기반으로 유사 소재 2~3종 추가 제작을 권장합니다.",
+        "클릭 반응이 급증한 소재로 썸네일·카피 반응이 좋은 구간입니다. 다만 전환은 아직 발생하지 않은 상태입니다.",
+        "썸네일·카피 컨셉을 유지하고 랜딩 페이지 및 상품 적합성을 점검하세요. 전환 유도형 카피/오퍼 변형 테스트를 권장합니다.",
+    ),
+    "CONVERSION_EARLY": (
+        "전환이 발생하며 ROAS가 기준치를 상회하는 초기 전환 신호입니다. 모수는 작지만 전환 가능성이 확인된 구간입니다.",
+        "6시간 추가 관찰하여 ROAS 유지 여부를 확인하세요. 동일 썸네일·카피 컨셉 기반 유사 소재 2~3종 제작을 권장하며, 즉시 예산 증액은 보류합니다.",
+    ),
+    "CLICK_TO_CONVERT_GAP": (
+        "클릭 반응과 일부 전환은 발생했으나 ROAS가 기준치에 미달하는 구간입니다. 유입 대비 전환 효율이 낮은 상태입니다.",
+        "상세페이지, 가격, 혜택 등 전환 요소를 점검하세요. 썸네일 유지 + 카피/오퍼 중심으로 수정 테스트 후 재검증하세요.",
     ),
     "CONVERSION_SURGE": (
         "직전 6시간 대비 전환율과 ROAS가 모두 개선된 실질적 전환 급증 구간입니다.",
@@ -302,8 +338,16 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
     subtype_context = {
         # ── Performance ──
         "CLICK_SURGE": (
-            "AI 인사이트: CTR이 급등한 이유를 썸네일·카피 반응 관점에서 해석하세요. "
-            "ACTION 가이드: 이 소재의 썸네일·카피 컨셉을 기반으로 유사 소재 2~3종 추가 제작을 안내하세요."
+            "AI 인사이트: CTR이 급등한 이유를 썸네일·카피 반응 관점에서 해석하세요. 전환은 아직 0건임을 반영하세요. "
+            "ACTION 가이드: 랜딩 페이지 점검과 전환 유도형 카피/오퍼 변형 테스트를 안내하세요."
+        ),
+        "CONVERSION_EARLY": (
+            "AI 인사이트: 소량이지만 전환이 발생하고 ROAS가 기준치를 상회하는 이유를 데이터 기반으로 해석하세요. "
+            "ACTION 가이드: 6시간 추가 관찰, 유사 소재 2~3종 제작, 즉시 예산 증액 보류를 안내하세요."
+        ),
+        "CLICK_TO_CONVERT_GAP": (
+            "AI 인사이트: 클릭은 발생했지만 전환 효율이 낮은 이유를 랜딩·상품·오퍼 관점에서 해석하세요. "
+            "ACTION 가이드: 상세페이지·가격·혜택 점검과 카피/오퍼 수정 테스트를 안내하세요."
         ),
         "CONVERSION_SURGE": (
             "AI 인사이트: 직전 6시간 대비 전환율과 ROAS가 모두 개선된 이유를 데이터 기반으로 해석하세요. "
@@ -527,6 +571,8 @@ def build_email_html(alerts: list) -> str:
         # alert_subtype 뱃지 텍스트
         subtype_label = {
             "CLICK_SURGE":           "클릭 급증형",
+            "CONVERSION_EARLY":      "초기 전환 감지형",
+            "CLICK_TO_CONVERT_GAP":  "전환 미흡형",
             "CONVERSION_SURGE":      "전환 급증형",
             "CONVERSION_SURGE_COLD": "첫 전환 급등형",
             "DEFAULT":               "",
@@ -748,13 +794,13 @@ def send_slack_alert(alerts: list) -> None:
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
                     "*최근 6시간 브랜딩 지표*\n"
-                    "```\n"
-                    f"{'지표':<18} {'현재값':>10}  {'12h 대비':>10}\n"
-                    f"{'─'*42}\n"
-                    f"{'Impressions_6h':<18} {int(a.get('impressions_6h',0)):>9,}회  {'─':>10}\n"
-                    f"{'Clicks_6h':<18} {int(a.get('clicks_6h',0)):>9,}회  {'─':>10}\n"
-                    f"{'CTR_6h':<18} {ctr_6h:>9.2%}  {('+' if ctr_diff_pp>=0 else '')+f'{ctr_diff_pp:.1f}%p':>10}\n"
-                    f"{'CTR_12h':<18} {ctr_12h:>9.2%}  {'─':>10}\n"
+                    "```\n" +
+                    ljust_dw("지표", 16) + rjust_dw("현재값", 12) + rjust_dw("12h 대비", 12) + "\n" +
+                    "─" * 42 + "\n" +
+                    ljust_dw("Impressions_6h", 16) + rjust_dw(f"{int(a.get('impressions_6h',0)):,}회", 12) + rjust_dw("─", 12) + "\n" +
+                    ljust_dw("Clicks_6h", 16)      + rjust_dw(f"{int(a.get('clicks_6h',0)):,}회", 12)     + rjust_dw("─", 12) + "\n" +
+                    ljust_dw("CTR_6h", 16)         + rjust_dw(f"{ctr_6h:.2%}", 12)                        + rjust_dw(('+' if ctr_diff_pp>=0 else '')+f"{ctr_diff_pp:.1f}%p", 12) + "\n" +
+                    ljust_dw("CTR_12h", 16)        + rjust_dw(f"{ctr_12h:.2%}", 12)                       + rjust_dw("─", 12) + "\n" +
                     "```"
                 )}},
                 {"type": "divider"},
@@ -772,6 +818,8 @@ def send_slack_alert(alerts: list) -> None:
             purch_diff    = int(a["purchases_6h"]) - purch_base
             subtype_label = {
                 "CLICK_SURGE":           "클릭 급증형",
+                "CONVERSION_EARLY":      "초기 전환 감지형",
+                "CLICK_TO_CONVERT_GAP":  "전환 미흡형",
                 "CONVERSION_SURGE":      "전환 급증형",
                 "CONVERSION_SURGE_COLD": "첫 전환 급등형",
             }.get(alert_subtype, "")
@@ -790,18 +838,25 @@ def send_slack_alert(alerts: list) -> None:
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
                     "*최근 6시간 성과*\n"
-                    "```\n"
-                    f"{'지표':<18} {'기준':>9}  {'현재값':>12}  {'대비':>10}\n"
-                    f"{'─'*55}\n"
-                    f"{'Spend_6h':<18} {'100,000원':>9}  {a['spend_6h']:>11,.0f}원  {'─':>10}\n"
-                    f"{'Clicks_6h':<18} {'─':>9}  {int(a.get('clicks_6h',0)):>11,}회  {'─':>10}\n"
-                    f"{'Purchases_6h':<18} {str(purch_base)+'건':>9}  {int(a['purchases_6h']):>11}건  {('+' if purch_diff>=0 else '')+str(purch_diff)+'건':>10}\n"
-                    f"{'Revenue_6h':<18} {'─':>9}  {a['revenue_6h']:>11,.0f}원  {'─':>10}\n"
-                    f"{'ROAS_6h':<18} {f'{roas_base:.0%}':>9}  {a['roas_6h']:>11.1%}  {('+' if roas_diff_pp>=0 else '')+f'{roas_diff_pp:.0f}%p':>10}\n"
-                    f"{'ROAS_12h':<18} {'─':>9}  {a['roas_12h']:>11.1%}  {'─':>10}\n"
-                    f"{'CTR_6h':<18} {'12h기준':>9}  {ctr_6h:>11.2%}  {('+' if ctr_diff_pp>=0 else '')+f'{ctr_diff_pp:.1f}%p':>10}\n"
-                    f"{'CTR_12h':<18} {'─':>9}  {ctr_12h:>11.2%}  {'─':>10}\n"
+                    "```\n" +
+                    ljust_dw("지표", 16) + rjust_dw("기준", 11) + rjust_dw("현재값", 13) + rjust_dw("대비", 11) + "\n" +
+                    "─" * 53 + "\n" +
+                    ljust_dw("Spend_6h", 16)    + rjust_dw("100,000원", 11) + rjust_dw(f"{a['spend_6h']:,.0f}원", 13)              + rjust_dw("─", 11) + "\n" +
+                    ljust_dw("Clicks_6h", 16)   + rjust_dw("─", 11)         + rjust_dw(f"{int(a.get('clicks_6h',0)):,}회", 13)    + rjust_dw("─", 11) + "\n" +
+                    ljust_dw("Purchases_6h", 16)+ rjust_dw(f"{purch_base}건", 11) + rjust_dw(f"{int(a['purchases_6h'])}건", 13)   + rjust_dw(('+' if purch_diff>=0 else '')+f"{purch_diff}건", 11) + "\n" +
+                    ljust_dw("Revenue_6h", 16)  + rjust_dw("─", 11)         + rjust_dw(f"{a['revenue_6h']:,.0f}원", 13)           + rjust_dw("─", 11) + "\n" +
+                    ljust_dw("ROAS_6h", 16)     + rjust_dw(f"{roas_base:.0%}", 11) + rjust_dw(f"{a['roas_6h']:.1%}", 13)         + rjust_dw(('+' if roas_diff_pp>=0 else '')+f"{roas_diff_pp:.0f}%p", 11) + "\n" +
+                    ljust_dw("ROAS_12h", 16)    + rjust_dw("─", 11)         + rjust_dw(f"{a['roas_12h']:.1%}", 13)               + rjust_dw("─", 11) + "\n" +
+                    ljust_dw("CTR_6h", 16)      + rjust_dw("12h기준", 11)   + rjust_dw(f"{ctr_6h:.2%}", 13)                      + rjust_dw(('+' if ctr_diff_pp>=0 else '')+f"{ctr_diff_pp:.1f}%p", 11) + "\n" +
+                    ljust_dw("CTR_12h", 16)     + rjust_dw("─", 11)         + rjust_dw(f"{ctr_12h:.2%}", 13)                     + rjust_dw("─", 11) + "\n" +
                     "```"
+                )}},
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text": (
+                    "*기준 대비 상승폭*\n"
+                    f"• ROAS: 기준 {roas_base:.0%} 대비 *{'+' if roas_diff_pp>=0 else ''}{roas_diff_pp:.0f}%p* ({a['roas_6h']:.1%} vs {roas_base:.0%})\n"
+                    f"• 구매건수: 기준 {purch_base}건 대비 *{'+' if purch_diff>=0 else ''}{purch_diff}건* ({int(a['purchases_6h'])}건 vs {purch_base}건)\n"
+                    f"• CTR: 12시간 대비 *{'+' if ctr_diff_pp>=0 else ''}{ctr_diff_pp:.1f}%p* (CTR_6h: {ctr_6h:.2%} vs CTR_12h: {ctr_12h:.2%})"
                 )}},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":bulb: *AI 인사이트*\n{a.get('ai_insight', '')}"}},
@@ -1141,17 +1196,12 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
         # Performance 캠페인 분기
         # ════════════════════════════════════
 
-        # 필터: purchases / revenue 가 0이면 skip
-        if row["purchases_6h"] <= 0 or row["revenue_6h"] <= 0:
-            continue
-
-        # ── Opportunity Alert 공통 조건 ──
-        roas_improving = row["roas_6h"] >= row["roas_12h"]
+        # ── Opportunity Alert 공통 진입 조건 ──
         opp_gate = (
-            row["roas_6h"]     >= OPP_FILTER["roas_6h_min"]
-            and row["spend_6h"]     >= OPP_FILTER["spend_6h_min"]
-            and row["purchases_6h"] >= OPP_FILTER["purchases_6h_min"]
-            and roas_improving
+            row["impressions_6h"] >= OPP_FILTER["impressions_6h_min"]
+            and row["clicks_6h"]  >= OPP_FILTER["clicks_6h_min"]
+            and row["spend_6h"]   >= OPP_FILTER["spend_6h_min"]
+            and row["ctr_6h"]     >= row["ctr_12h"]
         )
 
         if opp_gate:
