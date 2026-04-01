@@ -75,14 +75,12 @@ def check_operating_hours() -> None:
 # ─────────────────────────────────────────
 # Alert 조건 (운영 기준)
 # ─────────────────────────────────────────
-# Opportunity 공통 필터
+# Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS 사용)
 OPP_FILTER = {
     "purchases_6h_min":   5,
     "spend_6h_min":       100_000,
     "roas_6h_min":        3.0,   # 300%
-    "impressions_6h_min": 5_000,
-    "clicks_6h_min":      100,
-    # ctr_6h >= ctr_12h 는 코드에서 직접 비교
+    # roas_6h >= roas_12h 는 코드에서 직접 비교
 }
 
 # action_type 분기 조건 (우선순위: CAMPAIGN_SCALE > PRODUCT_EXTRACTION > CREATIVE_EXPANSION)
@@ -1197,19 +1195,13 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
         # ════════════════════════════════════
 
         # ── Opportunity Alert 공통 진입 조건 ──
+        roas_improving = row["roas_6h"] >= row["roas_12h"]
         opp_gate = (
-            row["impressions_6h"] >= OPP_FILTER["impressions_6h_min"]
-            and row["clicks_6h"]  >= OPP_FILTER["clicks_6h_min"]
-            and row["spend_6h"]   >= OPP_FILTER["spend_6h_min"]
-            and row["ctr_6h"]     >= row["ctr_12h"]
+            row["roas_6h"]      >= OPP_FILTER["roas_6h_min"]
+            and row["spend_6h"] >= OPP_FILTER["spend_6h_min"]
+            and row["purchases_6h"] >= OPP_FILTER["purchases_6h_min"]
+            and roas_improving
         )
-
-        if not opp_gate:
-            print(f"  [DEBUG-SKIP] {row['AD_NAME'][:30]} | "
-                  f"imp={int(row['impressions_6h']):,}(min {OPP_FILTER['impressions_6h_min']:,}) "
-                  f"clk={int(row['clicks_6h']):,}(min {OPP_FILTER['clicks_6h_min']:,}) "
-                  f"spend={int(row['spend_6h']):,}(min {OPP_FILTER['spend_6h_min']:,}) "
-                  f"ctr6h={row['ctr_6h']:.3%} ctr12h={row['ctr_12h']:.3%}")
 
         if opp_gate:
             action_type = determine_action_type(
