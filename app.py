@@ -78,7 +78,7 @@ def check_operating_hours() -> None:
 # Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS 사용)
 OPP_FILTER = {
     "purchases_6h_min":   5,
-    "spend_6h_min":       100_000,
+    "spend_6h_min":       30_000,
     "roas_6h_min":        3.0,   # 300%
     # roas_6h >= roas_12h 는 코드에서 직접 비교
 }
