@@ -1204,6 +1204,13 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
             and row["ctr_6h"]     >= row["ctr_12h"]
         )
 
+        if not opp_gate:
+            print(f"  [DEBUG-SKIP] {row['AD_NAME'][:30]} | "
+                  f"imp={int(row['impressions_6h']):,}(min {OPP_FILTER['impressions_6h_min']:,}) "
+                  f"clk={int(row['clicks_6h']):,}(min {OPP_FILTER['clicks_6h_min']:,}) "
+                  f"spend={int(row['spend_6h']):,}(min {OPP_FILTER['spend_6h_min']:,}) "
+                  f"ctr6h={row['ctr_6h']:.3%} ctr12h={row['ctr_12h']:.3%}")
+
         if opp_gate:
             action_type = determine_action_type(
                 row["roas_6h"], row["spend_6h"], row["purchases_6h"]
