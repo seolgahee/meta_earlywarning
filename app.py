@@ -77,8 +77,8 @@ def check_operating_hours() -> None:
 # ─────────────────────────────────────────
 # Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS 사용)
 OPP_FILTER = {
-    "purchases_6h_min":   5,
-    "spend_6h_min":       30_000,
+    "purchases_6h_min":   1,
+    "spend_6h_min":       10_000,
     "roas_6h_min":        3.0,   # 300%
     # roas_6h >= roas_12h 는 코드에서 직접 비교
 }
@@ -88,17 +88,17 @@ OPP_FILTER = {
 ACTION_CONDITIONS = {
     "CAMPAIGN_SCALE": {
         "roas_6h_min":      3.0,   # 300%
-        "purchases_6h_min": 5,
+        "purchases_6h_min": 3,
         "guide": "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요.",
     },
     "PRODUCT_EXTRACTION": {
         "roas_6h_min":  3.0,       # 300%
-        "spend_6h_min": 100_000,
+        "spend_6h_min": 50_000,
         "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
     "CREATIVE_EXPANSION": {
         "roas_6h_min":      2.5,   # 250%
-        "purchases_6h_min": 2,
+        "purchases_6h_min": 1,
         "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
 }
@@ -1211,13 +1211,6 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
             and row["purchases_6h"] >= OPP_FILTER["purchases_6h_min"]
             and roas_improving
         )
-
-        if not opp_gate and (row["purchases_6h"] > 0 or row["spend_6h"] > 0):
-            print(f"  [opp_gate 미달] {row['AD_NAME'][:40]}"
-                  f" | purchases_6h={int(row['purchases_6h'])}건(기준:{OPP_FILTER['purchases_6h_min']})"
-                  f" spend_6h={row['spend_6h']:,.0f}원(기준:{OPP_FILTER['spend_6h_min']:,})"
-                  f" roas_6h={row['roas_6h']:.1%}(기준:{OPP_FILTER['roas_6h_min']:.0%})"
-                  f" roas_improving={roas_improving}")
 
         if opp_gate:
             action_type = determine_action_type(
