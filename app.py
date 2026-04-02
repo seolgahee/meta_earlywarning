@@ -981,25 +981,6 @@ def build_dataframe(raw_data: list) -> pd.DataFrame:
     snapshot_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
-    # DEBUG: 전체 광고에서 purchase 관련 action_type 스캔
-    all_action_types = set()
-    purchase_found = []
-    for item in raw_data:
-        for a in item.get("actions", []):
-            all_action_types.add(a.get("action_type"))
-        for a in item.get("action_values", []):
-            all_action_types.add(a.get("action_type"))
-        if any("purchase" in str(a.get("action_type", "")).lower() for a in item.get("actions", [])):
-            purchase_found.append({
-                "ad_id": item.get("ad_id"),
-                "actions": [(a["action_type"], a.get("value")) for a in item.get("actions", []) if "purchase" in a.get("action_type","").lower()],
-                "action_values": [(a["action_type"], a.get("value")) for a in item.get("action_values", []) if "purchase" in a.get("action_type","").lower()],
-            })
-    print("[DEBUG] 전체 action_types:", sorted(all_action_types))
-    print(f"[DEBUG] purchase 포함 광고 수: {len(purchase_found)}")
-    for p in purchase_found[:3]:
-        print(f"  ad_id={p['ad_id']} actions={p['actions']} values={p['action_values']}")
-
     for item in raw_data:
         campaign_name = item.get("campaign_name", "")
         adset_name    = item.get("adset_name", "")
@@ -1230,6 +1211,13 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
             and row["purchases_6h"] >= OPP_FILTER["purchases_6h_min"]
             and roas_improving
         )
+
+        if not opp_gate and (row["purchases_6h"] > 0 or row["spend_6h"] > 0):
+            print(f"  [opp_gate 미달] {row['AD_NAME'][:40]}"
+                  f" | purchases_6h={int(row['purchases_6h'])}건(기준:{OPP_FILTER['purchases_6h_min']})"
+                  f" spend_6h={row['spend_6h']:,.0f}원(기준:{OPP_FILTER['spend_6h_min']:,})"
+                  f" roas_6h={row['roas_6h']:.1%}(기준:{OPP_FILTER['roas_6h_min']:.0%})"
+                  f" roas_improving={roas_improving}")
 
         if opp_gate:
             action_type = determine_action_type(
