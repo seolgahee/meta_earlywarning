@@ -981,11 +981,24 @@ def build_dataframe(raw_data: list) -> pd.DataFrame:
     snapshot_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
-    # DEBUG: action_type 확인 (1회만 출력)
-    if raw_data:
-        sample = raw_data[0]
-        print("[DEBUG] actions:", [a.get("action_type") for a in sample.get("actions", [])])
-        print("[DEBUG] action_values:", [a.get("action_type") for a in sample.get("action_values", [])])
+    # DEBUG: 전체 광고에서 purchase 관련 action_type 스캔
+    all_action_types = set()
+    purchase_found = []
+    for item in raw_data:
+        for a in item.get("actions", []):
+            all_action_types.add(a.get("action_type"))
+        for a in item.get("action_values", []):
+            all_action_types.add(a.get("action_type"))
+        if any("purchase" in str(a.get("action_type", "")).lower() for a in item.get("actions", [])):
+            purchase_found.append({
+                "ad_id": item.get("ad_id"),
+                "actions": [(a["action_type"], a.get("value")) for a in item.get("actions", []) if "purchase" in a.get("action_type","").lower()],
+                "action_values": [(a["action_type"], a.get("value")) for a in item.get("action_values", []) if "purchase" in a.get("action_type","").lower()],
+            })
+    print("[DEBUG] 전체 action_types:", sorted(all_action_types))
+    print(f"[DEBUG] purchase 포함 광고 수: {len(purchase_found)}")
+    for p in purchase_found[:3]:
+        print(f"  ad_id={p['ad_id']} actions={p['actions']} values={p['action_values']}")
 
     for item in raw_data:
         campaign_name = item.get("campaign_name", "")
