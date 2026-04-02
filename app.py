@@ -981,6 +981,12 @@ def build_dataframe(raw_data: list) -> pd.DataFrame:
     snapshot_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
+    # DEBUG: action_type 확인 (1회만 출력)
+    if raw_data:
+        sample = raw_data[0]
+        print("[DEBUG] actions:", [a.get("action_type") for a in sample.get("actions", [])])
+        print("[DEBUG] action_values:", [a.get("action_type") for a in sample.get("action_values", [])])
+
     for item in raw_data:
         campaign_name = item.get("campaign_name", "")
         adset_name    = item.get("adset_name", "")
