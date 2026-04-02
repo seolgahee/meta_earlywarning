@@ -134,21 +134,30 @@ def ljust_dw(s: str, width: int) -> str:
     return str(s) + " " * max(0, width - dw(s))
 
 
+PURCHASE_ACTION_TYPES = [
+    "omni_purchase",
+    "offsite_conversion.fb_pixel_purchase",
+    "purchase",
+]
+
+
 def extract_purchase_count(actions: list) -> int:
     if not actions:
         return 0
-    for item in actions:
-        if item.get("action_type") == "purchase":
-            return int(float(item.get("value", 0)))
+    action_map = {item.get("action_type"): item for item in actions}
+    for atype in PURCHASE_ACTION_TYPES:
+        if atype in action_map:
+            return int(float(action_map[atype].get("value", 0)))
     return 0
 
 
 def extract_purchase_revenue(action_values: list) -> float:
     if not action_values:
         return 0.0
-    for item in action_values:
-        if item.get("action_type") == "purchase":
-            return float(item.get("value", 0.0))
+    action_map = {item.get("action_type"): item for item in action_values}
+    for atype in PURCHASE_ACTION_TYPES:
+        if atype in action_map:
+            return float(action_map[atype].get("value", 0.0))
     return 0.0
 
 
