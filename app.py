@@ -77,7 +77,7 @@ def check_operating_hours() -> None:
 # ─────────────────────────────────────────
 # Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS 사용)
 OPP_FILTER = {
-    "purchases_6h_min":   1,
+    "purchases_6h_min":   2,
     "spend_6h_min":       10_000,
     "roas_6h_min":        3.0,   # 300%
     # roas_6h >= roas_12h 는 코드에서 직접 비교
@@ -98,7 +98,7 @@ ACTION_CONDITIONS = {
     },
     "CREATIVE_EXPANSION": {
         "roas_6h_min":      2.5,   # 250%
-        "purchases_6h_min": 1,
+        "purchases_6h_min": 2,
         "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
 }
