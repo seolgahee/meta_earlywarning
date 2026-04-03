@@ -185,13 +185,15 @@ def determine_alert_subtype(
     purchases_6h: float, roas_6h: float, roas_12h: float,
     purchases_prev_6h: float = 0, clicks_6h: float = 0,
     clicks_prev_6h: float = 0, roas_prev_6h: float = 0,
+    purchases_12h: float = 0,
 ) -> str:
     """
     alert 성격 분류 (전환 단계 기준)
     CONVERSION_SURGE_COLD: 최근 6h 전환 >= 5건, clicks >= 100, 직전 6h 전환 == 0건 (첫 발생)
     CONVERSION_SURGE:      최근 6h 전환 >= 5건, clicks >= 100, CVR/ROAS 모두 직전 6h 대비 개선
-    CONVERSION_EARLY:      1 <= 전환 < 5건, ROAS >= 기준치 (초기 전환 감지형)
-    CLICK_TO_CONVERT_GAP:  1 <= 전환 < 5건, CTR 상승 + ROAS < 기준치 (전환 미흡형)
+                           또는 최근 6h 전환 2~4건이지만 12h 누적 >= 5건 + ROAS >= 기준치 (12h 누적 전환형)
+    CONVERSION_EARLY:      2 <= 전환 < 5건, ROAS >= 기준치 (초기 전환 감지형)
+    CLICK_TO_CONVERT_GAP:  2 <= 전환 < 5건, CTR 상승 + ROAS < 기준치 (전환 미흡형)
     CLICK_SURGE:           전환 0건, CTR_6h > CTR_12h (순수 클릭 반응형)
     DEFAULT:               위 조건에 해당하지 않는 경우
     """
@@ -210,8 +212,11 @@ def determine_alert_subtype(
         ):
             return "CONVERSION_SURGE"
 
-    # purchases 1~4: 초기 전환 단계
-    if 1 <= purchases_6h < 5:
+    # purchases 2~4: 초기 전환 단계
+    if 2 <= purchases_6h < 5:
+        # 12시간 누적 전환이 5건 이상이면 CONVERSION_SURGE에 준하는 대응
+        if purchases_12h >= 5 and roas_6h >= roas_threshold:
+            return "CONVERSION_SURGE"
         if roas_6h >= roas_threshold:
             return "CONVERSION_EARLY"
         if ctr_6h > ctr_12h:
@@ -336,7 +341,14 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
     alert_subtype = alert.get("alert_subtype", "DEFAULT")
     fallback      = FALLBACK.get(alert_subtype, FALLBACK["DEFAULT"])
 
+    is_partnership = "파트너십" in alert.get("adset_name", "")
+
     if not _gemini_client:
+        if is_partnership:
+            return (
+                fallback[0],
+                "해당 인플루언서 소재의 반응이 좋습니다. 해당 인플루언서의 또 다른 소재 추가를 제안하며, ASC 캠페인 일cap 상향으로 노출을 증대하세요.",
+            )
         return fallback
 
     is_br = alert.get("alert_type") == "BR"
@@ -379,6 +391,15 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
         ),
     }
 
+    # 파트너십 광고세트인 경우 모든 subtype 지침을 인플루언서 관점으로 오버라이드
+    if is_partnership:
+        partnership_guide = (
+            "AI 인사이트: 인플루언서가 게재한 파트너십 소재의 반응이 좋아진 이유를 소재 특성·타겟 공감 관점에서 해석하세요. "
+            "ACTION 가이드: 해당 인플루언서의 또 다른 소재 추가를 제안하고, ASC 캠페인 일cap 상향으로 노출을 증대할 것을 안내하세요. "
+            "브랜드가 직접 제작한 소재 추가나 소재 자체 수정은 절대 언급하지 마세요."
+        )
+        subtype_context = {k: partnership_guide for k in subtype_context}
+
     if is_br:
         prompt = f"""
 당신은 디지털 광고 브랜딩 마케터입니다.
@@ -409,6 +430,13 @@ AI_INSIGHT: (한 문장)
 ACTION_GUIDE: (한~두 문장)
 """.strip()
     else:
+        partnership_note = (
+            "\n[파트너십 광고 주의사항]\n"
+            "이 광고는 인플루언서가 직접 게재한 파트너십(협업) 광고입니다. 브랜드가 소재를 직접 제작·수정할 수 없습니다.\n"
+            "따라서 '신규 소재 제작', '소재 컨셉 변경', '카피 수정' 등의 가이드는 절대 금지합니다.\n"
+            "액션 가이드는 반드시 ① 해당 인플루언서의 또 다른 소재 추가 제안 ② ASC 캠페인 일cap 상향으로 노출 증대 두 가지로만 작성하세요."
+        ) if is_partnership else ""
+
         prompt = f"""
 당신은 디지털 광고 퍼포먼스 마케터입니다.
 아래 Meta 광고 데이터를 보고 AI 인사이트(왜 반응이 좋아졌는지 해석)와 액션 가이드(운영자가 당장 해야 할 행동)를 각각 작성하세요.
@@ -419,7 +447,7 @@ ACTION_GUIDE: (한~두 문장)
 - 광고소재: {alert['ad_name']}
 - 채널: {alert['channel']}
 - alert 유형: {alert_subtype} / {action_type}
-
+{partnership_note}
 [성과 데이터]
 - Spend_6h: {alert['spend_6h']:,.0f}원
 - Clicks_6h: {int(alert.get('clicks_6h', 0))}회
@@ -434,6 +462,7 @@ ACTION_GUIDE: (한~두 문장)
 - ACTION_GUIDE는 운영자가 "무엇을" 해야 하는지 한~두 문장으로 구체적 지시
 - 입력 데이터만 근거로 해석, 외부 요인 추정 금지
 - 숫자 과장 금지, 한국어, 짧고 실무적인 톤
+- ASC 캠페인은 소재(광고) 단위 예산 조정이 불가하므로, 예산 관련 액션은 반드시 "캠페인 일cap 상향" 표현만 사용할 것. "소재 예산 증액", "예산을 늘리세요", "예산 증액" 등의 표현은 절대 사용 금지.
 
 [출력 형식] (반드시 아래 형식 그대로)
 AI_INSIGHT: (한 문장)
@@ -504,7 +533,7 @@ def build_email_html(alerts: list) -> str:
           </div>
           {(
               '<div style="margin-bottom:14px;text-align:center;">'
-              f'<img src="{a["creative_image_url"]}" width="250" '
+              f'<img src="{a["creative_image_url"]}" width="480" '
               'style="max-width:100%;border-radius:6px;border:1px solid #e0e0e0;" '
               'alt="소재 이미지" />'
               '</div>'
@@ -603,7 +632,7 @@ def build_email_html(alerts: list) -> str:
 
           {(
               '<div style="margin-bottom:14px;text-align:center;">'
-              f'<img src="{a["creative_image_url"]}" width="250" '
+              f'<img src="{a["creative_image_url"]}" width="480" '
               'style="max-width:100%;border-radius:6px;border:1px solid #e0e0e0;" '
               'alt="소재 이미지" />'
               '</div>'
@@ -914,10 +943,11 @@ def fetch_creative_image(ad_id: str) -> str:
             return ""
         creative = resp.json().get("creative", {})
 
-        if creative.get("thumbnail_url"):
-            return creative["thumbnail_url"]
+        # image_url이 원본 고화질, thumbnail_url은 저해상도 프리뷰이므로 우선순위 조정
         if creative.get("image_url"):
             return creative["image_url"]
+        if creative.get("thumbnail_url"):
+            return creative["thumbnail_url"]
 
         image_hash = creative.get("image_hash")
         if image_hash:
@@ -926,14 +956,14 @@ def fetch_creative_image(ad_id: str) -> str:
                 params={
                     "access_token": ACCESS_TOKEN,
                     "hashes": image_hash,
-                    "fields": "url",
+                    "fields": "url,permalink_url",
                 },
                 timeout=10,
             )
             if img_resp.status_code == 200:
                 data = img_resp.json().get("data", [])
-                if data and data[0].get("url"):
-                    return data[0]["url"]
+                if data:
+                    return data[0].get("permalink_url") or data[0].get("url") or ""
 
         return ""
     except Exception as e:
@@ -1224,6 +1254,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                 row["purchases_6h"], row["roas_6h"], row["roas_12h"],
                 row["purchases_prev_6h"], row["clicks_6h"],
                 row["clicks_prev_6h"], row["roas_prev_6h"],
+                row["purchases_12h"],
             )
             print(f"[{action_type}/{_subtype_preview}] {ad_info}")
             print(f"  roas_6h={row['roas_6h']:.1%}  spend_6h={row['spend_6h']:,.0f}원"
