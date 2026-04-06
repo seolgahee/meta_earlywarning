@@ -935,7 +935,7 @@ def fetch_creative_image(ad_id: str) -> str:
             f"https://graph.facebook.com/{API_VERSION}/{ad_id}",
             params={
                 "access_token": ACCESS_TOKEN,
-                "fields": "creative{thumbnail_url,image_url,image_hash}",
+                "fields": "creative{thumbnail_url,image_url,image_hash,object_story_id}",
             },
             timeout=10,
         )
@@ -943,9 +943,27 @@ def fetch_creative_image(ad_id: str) -> str:
             return ""
         creative = resp.json().get("creative", {})
 
-        # image_url이 원본 고화질, thumbnail_url은 저해상도 프리뷰이므로 우선순위 조정
+        # image_url이 원본 고화질이므로 최우선
         if creative.get("image_url"):
             return creative["image_url"]
+
+        # 파트너십(인플루언서) 소재: object_story_id로 인스타그램 포스팅 원본 이미지 조회
+        object_story_id = creative.get("object_story_id")
+        if object_story_id:
+            post_resp = requests.get(
+                f"https://graph.facebook.com/{API_VERSION}/{object_story_id}",
+                params={
+                    "access_token": ACCESS_TOKEN,
+                    "fields": "full_picture",
+                },
+                timeout=10,
+            )
+            if post_resp.status_code == 200:
+                full_picture = post_resp.json().get("full_picture")
+                if full_picture:
+                    return full_picture
+
+        # fallback: thumbnail_url (저해상도 프리뷰)
         if creative.get("thumbnail_url"):
             return creative["thumbnail_url"]
 
