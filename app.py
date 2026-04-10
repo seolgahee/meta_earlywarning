@@ -53,6 +53,10 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 BRAND          = "SERGIO_TACCHINI"
 ALERT_LOG_FILE = "alert_sent_log.json"
 
+SNOWFLAKE_STOCK_SCHEMA = os.getenv("SNOWFLAKE_STOCK_SCHEMA", "PRCS")
+SNOWFLAKE_STOCK_TABLE  = os.getenv("SNOWFLAKE_STOCK_TABLE",  "DB_SCS_W")
+STOCK_BRAND_CD         = os.getenv("STOCK_BRAND_CD", "ST")
+
 if not ACCESS_TOKEN or not AD_ACCOUNT_ID:
     print("[오류] .env에 META_ACCESS_TOKEN, META_AD_ACCOUNT_ID 값이 없습니다.")
     exit(1)
@@ -161,6 +165,71 @@ def extract_purchase_revenue(action_values: list) -> float:
     return 0.0
 
 
+def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
+    """
+    소재명 마지막 토큰에서 PART_CD-COLOR_CD 추출.
+    예: '260330_PQ_폴로티셔츠_TWSK16063-WHS' → ('TWSK16063', 'WHS')
+    패턴 미해당 시 (None, None) 반환.
+    """
+    match = re.search(r'_([A-Z0-9]+-[A-Z]+)$', ad_name)
+    if match:
+        code = match.group(1)
+        parts = code.split('-', 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+    return None, None
+
+
+_SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
+
+
+def fetch_stock_info(part_cd: str, color_cd: str) -> list[dict]:
+    """
+    PRCS.DB_SCS_W에서 가장 최근 주차 기준 사이즈별 재고 조회.
+    반환: [{"size": "M", "total": 10, "wh": 8, "sh": 2}, ...]
+    실패 시 빈 리스트.
+    """
+    if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD]):
+        return []
+    try:
+        conn = get_snowflake_conn()
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT SIZE_CD, STOCK_QTY, WH_STOCK_QTY, SH_STOCK_QTY
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.{SNOWFLAKE_STOCK_TABLE}
+            WHERE BRD_CD = %s
+              AND PART_CD = %s
+              AND COLOR_CD = %s
+              AND START_DT = (
+                  SELECT MAX(START_DT)
+                  FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.{SNOWFLAKE_STOCK_TABLE}
+                  WHERE BRD_CD = %s
+              )
+            ORDER BY SIZE_CD
+        """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD))
+        rows = cursor.fetchall()
+        conn.close()
+        result = [
+            {"size": row[0], "total": int(row[1] or 0), "wh": int(row[2] or 0), "sh": int(row[3] or 0)}
+            for row in rows
+        ]
+        result.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
+        return result
+    except Exception as e:
+        print(f"[경고] 재고 조회 실패 ({part_cd}-{color_cd}): {e}")
+        return []
+
+
+def format_stock_summary(stock_info: list[dict]) -> str:
+    """재고 총합 요약 문자열. 예: '총 45개 (창고 38 / 매장 7)'"""
+    if not stock_info:
+        return "재고 정보 없음"
+    total = sum(s["total"] for s in stock_info)
+    wh    = sum(s["wh"]    for s in stock_info)
+    sh    = sum(s["sh"]    for s in stock_info)
+    return f"총 {total:,}개 (창고 {wh:,} / 매장 {sh:,})"
+
+
 def detect_channel(campaign_name: str, adset_name: str) -> str:
     text = f"{campaign_name or ''} {adset_name or ''}".lower()
     if "무신사" in text or "musinsa" in text:
@@ -189,33 +258,33 @@ def determine_alert_subtype(
 ) -> str:
     """
     alert 성격 분류 (전환 단계 기준)
-    CONVERSION_SURGE_COLD: 최근 6h 전환 >= 5건, clicks >= 100, 직전 6h 전환 == 0건 (첫 발생)
-    CONVERSION_SURGE:      최근 6h 전환 >= 5건, clicks >= 100, CVR/ROAS 모두 직전 6h 대비 개선
-                           또는 최근 6h 전환 2~4건이지만 12h 누적 >= 5건 + ROAS >= 기준치 (12h 누적 전환형)
-    CONVERSION_EARLY:      2 <= 전환 < 5건, ROAS >= 기준치 (초기 전환 감지형)
-    CLICK_TO_CONVERT_GAP:  2 <= 전환 < 5건, CTR 상승 + ROAS < 기준치 (전환 미흡형)
+    CONVERSION_SURGE_COLD: 최근 6h 전환 >= 3건, clicks >= 100, 직전 6h 전환 == 0건 (첫 발생)
+    CONVERSION_SURGE:      최근 6h 전환 >= 3건, clicks >= 100, CVR/ROAS 모두 직전 6h 대비 개선
+                           또는 최근 6h 전환 2건이지만 12h 누적 >= 3건 + ROAS >= 기준치 (12h 누적 전환형)
+    CONVERSION_EARLY:      전환 == 2건, ROAS >= 기준치 (초기 전환 감지형)
+    CLICK_TO_CONVERT_GAP:  전환 == 2건, CTR 상승 + ROAS < 기준치 (전환 미흡형)
     CLICK_SURGE:           전환 0건, CTR_6h > CTR_12h (순수 클릭 반응형)
     DEFAULT:               위 조건에 해당하지 않는 경우
     """
     roas_threshold = OPP_FILTER["roas_6h_min"]
 
-    # purchases >= 5: Winner 판단
-    if purchases_6h >= 5 and clicks_6h >= 100:
+    # purchases >= 3: Winner 판단
+    if purchases_6h >= 3 and clicks_6h >= 100:
         if purchases_prev_6h == 0:
             return "CONVERSION_SURGE_COLD"
         cvr_recent = purchases_6h      / clicks_6h      if clicks_6h      > 0 else 0
         cvr_prev   = purchases_prev_6h / clicks_prev_6h if clicks_prev_6h > 0 else 0
         if (
-            (purchases_6h - purchases_prev_6h) >= 2
+            (purchases_6h - purchases_prev_6h) >= 1
             and roas_6h > roas_prev_6h
             and cvr_recent > cvr_prev
         ):
             return "CONVERSION_SURGE"
 
-    # purchases 2~4: 초기 전환 단계
-    if 2 <= purchases_6h < 5:
-        # 12시간 누적 전환이 5건 이상이면 CONVERSION_SURGE에 준하는 대응
-        if purchases_12h >= 5 and roas_6h >= roas_threshold:
+    # purchases == 2: 초기 전환 단계
+    if purchases_6h == 2:
+        # 12시간 누적 전환이 3건 이상이면 CONVERSION_SURGE에 준하는 대응
+        if purchases_12h >= 3 and roas_6h >= roas_threshold:
             return "CONVERSION_SURGE"
         if roas_6h >= roas_threshold:
             return "CONVERSION_EARLY"
