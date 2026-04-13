@@ -208,27 +208,41 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         conn = get_snowflake_conn()
         cursor = conn.cursor()
 
-        # 사이즈별 물류재고 + 전체재고 (color_cd None이면 전체 컬러 합산)
-        color_filter = "AND d.COLOR_CD = %s" if color_cd else ""
-        stock_params = [STOCK_BRAND_CD, part_cd] + ([color_cd] if color_cd else []) + [STOCK_BRAND_CD]
-        cursor.execute(f"""
-            SELECT d.SIZE_CD,
-                   SUM(d.WH_STOCK_QTY)  AS WH_STOCK,
-                   SUM(d.STOCK_QTY)     AS TOTAL_STOCK,
-                   MAX(p.PRDT_NM)       AS PRDT_NM
-            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
-            JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
-              ON d.PRDT_CD = p.PRDT_CD
-            WHERE d.BRD_CD = %s
-              AND d.PART_CD = %s
-              {color_filter}
-              AND d.START_DT = (
-                  SELECT MAX(START_DT)
-                  FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
-                  WHERE BRD_CD = %s
-              )
-            GROUP BY d.SIZE_CD
-        """, stock_params)
+        # 재고 조회: color_cd 있으면 사이즈별, 없으면 컬러별
+        latest_dt_sub = f"""
+            SELECT MAX(START_DT)
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
+            WHERE BRD_CD = %s
+        """
+        if color_cd:
+            # 단일 컬러 → 사이즈별 물류재고
+            cursor.execute(f"""
+                SELECT d.SIZE_CD,
+                       SUM(d.WH_STOCK_QTY) AS WH_STOCK,
+                       SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM)      AS PRDT_NM
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
+                  ON d.PRDT_CD = p.PRDT_CD
+                WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
+                  AND d.START_DT = ({latest_dt_sub})
+                GROUP BY d.SIZE_CD
+            """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD))
+        else:
+            # 전체 컬러 → 컬러별 물류재고 합산
+            cursor.execute(f"""
+                SELECT d.COLOR_CD,
+                       SUM(d.WH_STOCK_QTY) AS WH_STOCK,
+                       SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM)      AS PRDT_NM
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
+                  ON d.PRDT_CD = p.PRDT_CD
+                WHERE d.BRD_CD = %s AND d.PART_CD = %s
+                  AND d.START_DT = ({latest_dt_sub})
+                GROUP BY d.COLOR_CD
+                ORDER BY WH_STOCK DESC
+            """, (STOCK_BRAND_CD, part_cd, STOCK_BRAND_CD))
         stock_rows = cursor.fetchall()
 
         # 금주 판매량 조회 → 0이면 전주로 fallback
@@ -266,24 +280,50 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         if not stock_rows:
             return None
 
-        prdt_nm     = stock_rows[0][3] or ""
-        is_mc       = "MC" in prdt_nm.upper().split()
-        sizes       = [{"size": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
-        sizes.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
-        total_wh    = sum(s["wh"] for s in sizes)
-        weeks_of_supply = round(total_wh / weekly_qty_raw, 1) if weekly_qty_raw > 0 else None
+        prdt_nm = stock_rows[0][3] or ""
+        is_mc   = "MC" in prdt_nm.upper().split()
 
-        return {
-            "prdt_nm":         prdt_nm,
-            "is_mc":           is_mc,
-            "sizes":           sizes,
-            "weekly_qty":      weekly_qty_raw,
-            "weekly_label":    weekly_label,
-            "weeks_of_supply": weeks_of_supply,
-        }
+        if color_cd:
+            # 사이즈별
+            sizes = [{"size": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
+            sizes.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
+            total_wh = sum(s["wh"] for s in sizes)
+            weeks_of_supply = round(total_wh / weekly_qty_raw, 1) if weekly_qty_raw > 0 else None
+            return {
+                "prdt_nm":         prdt_nm,
+                "is_mc":           is_mc,
+                "sizes":           sizes,
+                "weekly_qty":      weekly_qty_raw,
+                "weekly_label":    weekly_label,
+                "weeks_of_supply": weeks_of_supply,
+            }
+        else:
+            # 컬러별
+            colors = [{"color": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
+            total_wh = sum(c["wh"] for c in colors)
+            weeks_of_supply = round(total_wh / weekly_qty_raw, 1) if weekly_qty_raw > 0 else None
+            return {
+                "prdt_nm":         prdt_nm,
+                "is_mc":           is_mc,
+                "colors":          colors,
+                "weekly_qty":      weekly_qty_raw,
+                "weekly_label":    weekly_label,
+                "weeks_of_supply": weeks_of_supply,
+            }
     except Exception as e:
         print(f"[경고] 재고 조회 실패 ({part_cd}-{color_cd}): {e}")
         return None
+
+
+def _stock_items(stock_info_item):
+    """sizes 또는 colors 리스트를 반환."""
+    return stock_info_item.get("sizes") or stock_info_item.get("colors") or []
+
+
+def _format_color_breakdown(item) -> str:
+    """컬러별 물류재고 한줄 포맷: WHS 50개 / INL 30개 / ..."""
+    colors = item.get("colors", [])
+    return " / ".join(f"{c['color']} {c['wh']}개" for c in colors if c['wh'] > 0) or "재고 없음"
 
 
 def format_stock_summary(stock_info) -> str:
@@ -292,12 +332,19 @@ def format_stock_summary(stock_info) -> str:
         return "재고 정보 없음"
     # 멀티 상품 리스트인 경우 각각 요약
     if isinstance(stock_info, list):
-        return " | ".join(
-            f"{s['prdt_nm'].split()[-1] if s.get('prdt_nm') else '?'}: {sum(sz['wh'] for sz in s['sizes'])}개"
-            for s in stock_info
-        )
-    total_wh  = sum(s["wh"] for s in stock_info["sizes"])
-    total_all = sum(s["total"] for s in stock_info["sizes"])
+        parts = []
+        for s in stock_info:
+            nm = s.get("prdt_nm", "?") or "?"
+            if s.get("colors") is not None:
+                # 컬러별 표기
+                parts.append(f"{nm}: {_format_color_breakdown(s)}")
+            else:
+                total_wh = sum(sz["wh"] for sz in _stock_items(s))
+                parts.append(f"{nm}: {total_wh}개")
+        return "\n".join(parts)
+    items = _stock_items(stock_info)
+    total_wh  = sum(s["wh"] for s in items)
+    total_all = sum(s["total"] for s in items)
 
     if stock_info.get("is_mc"):
         if total_all == 0:
@@ -328,12 +375,33 @@ def format_stock_md_guide(stock_info) -> str:
         lines = []
         for s in stock_info:
             nm = s.get("prdt_nm", "")
-            total_wh = sum(sz["wh"] for sz in s["sizes"])
-            lines.append(f"{nm}: 물류재고 {total_wh}개")
+            if s.get("colors") is not None:
+                lines.append(f"{nm}: {_format_color_breakdown(s)}")
+            else:
+                total_wh = sum(sz["wh"] for sz in _stock_items(s))
+                lines.append(f"{nm}: 물류재고 {total_wh}개")
         return "\n".join(lines)
-    sizes    = stock_info["sizes"]
-    total_wh = sum(s["wh"] for s in sizes)
+    items    = _stock_items(stock_info)
+    total_wh = sum(s["wh"] for s in items)
 
+    # 컬러별 데이터인 경우 (color_cd 없이 조회된 단일 상품)
+    if stock_info.get("colors") is not None:
+        color_line = _format_color_breakdown(stock_info)
+        weekly_qty   = stock_info.get("weekly_qty", 0)
+        weekly_label = stock_info.get("weekly_label", "금주")
+        wos          = stock_info.get("weeks_of_supply")
+        if total_wh == 0:
+            action = "[즉시] 물류재고 0 -> 매장->물류 이동 또는 추가 발주"
+        elif wos is not None and wos < 1:
+            action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+        elif wos is not None and wos < 2:
+            action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+        else:
+            wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
+            action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+        return f"{color_line}\n{action}"
+
+    sizes = items
     size_line = " / ".join(
         f"{s['size']} {s['wh']}개" + (f"(전체 {s['total']})" if s['total'] != s['wh'] else "")
         for s in sizes
