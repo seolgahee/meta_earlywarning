@@ -222,7 +222,7 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
                        SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
                        MAX(p.PRDT_NM)      AS PRDT_NM
                 FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
-                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
+                LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
                   AND d.START_DT = ({latest_dt_sub})
@@ -236,7 +236,7 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
                        SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
                        MAX(p.PRDT_NM)      AS PRDT_NM
                 FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
-                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
+                LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s
                   AND d.START_DT = ({latest_dt_sub})
@@ -280,7 +280,8 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         if not stock_rows:
             return None
 
-        prdt_nm = stock_rows[0][3] or ""
+        # LEFT JOIN 후 PRDT_NM이 NULL인 행이 있을 수 있으므로 첫 번째 non-null 값 사용
+        prdt_nm = next((r[3] for r in stock_rows if r[3]), "") or ""
         is_mc   = "MC" in prdt_nm.upper().split()
 
         if color_cd:
@@ -323,7 +324,7 @@ def _stock_items(stock_info_item):
 def _format_color_breakdown(item) -> str:
     """컬러별 물류재고 한줄 포맷: WHS 50개 / INL 30개 / ..."""
     colors = item.get("colors", [])
-    return " / ".join(f"{c['color']} {c['wh']}개" for c in colors if c['wh'] > 0) or "재고 없음"
+    return " / ".join(f"{c['color']} {c['wh']}개" for c in colors if c["wh"] > 0) or "재고 없음"
 
 
 def format_stock_summary(stock_info) -> str:
@@ -370,17 +371,42 @@ def format_stock_md_guide(stock_info) -> str:
     """MD용: 사이즈별 물류재고 + 가이드. MC 제품은 잔여 재고만 표기. 멀티 상품은 상품별 1줄씩."""
     if not stock_info:
         return ""
-    # 멀티 상품 리스트인 경우 각각 1줄로
+    # 멀티 상품 리스트인 경우 상품별 컬러/재고 + 액션 가이드
     if isinstance(stock_info, list):
         lines = []
         for s in stock_info:
             nm = s.get("prdt_nm", "")
+            wos          = s.get("weeks_of_supply")
+            weekly_qty   = s.get("weekly_qty", 0)
+            weekly_label = s.get("weekly_label", "금주")
             if s.get("colors") is not None:
-                lines.append(f"{nm}: {_format_color_breakdown(s)}")
+                color_line = _format_color_breakdown(s)
+                total_wh = sum(c["wh"] for c in s["colors"])
+                if total_wh == 0:
+                    action = "[즉시] 물류재고 0 -> 매장->물류 이동 또는 추가 발주"
+                elif wos is not None and wos < 1:
+                    action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                elif wos is not None and wos < 2:
+                    action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                else:
+                    wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
+                    action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                lines.append(f"{nm}: {color_line}\n{action}")
             else:
-                total_wh = sum(sz["wh"] for sz in _stock_items(s))
-                lines.append(f"{nm}: 물류재고 {total_wh}개")
-        return "\n".join(lines)
+                szs = _stock_items(s)
+                total_wh  = sum(sz["wh"] for sz in szs)
+                total_all = sum(sz["total"] for sz in szs)
+                if total_wh == 0:
+                    action = f"[즉시] 물류재고 0 (전체 {total_all}개) -> 매장->물류 이동 또는 추가 발주"
+                elif wos is not None and wos < 1:
+                    action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                elif wos is not None and wos < 2:
+                    action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                else:
+                    wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
+                    action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                lines.append(f"{nm}: 물류재고 {total_wh}개\n{action}")
+        return "\n\n".join(lines)
     items    = _stock_items(stock_info)
     total_wh = sum(s["wh"] for s in items)
 
@@ -1597,11 +1623,22 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                     print(f"  -> 이미지 없음 (파트너십 광고 또는 영상 소재)")
 
                 product_codes = extract_product_code(row["AD_NAME"])
+                # 동일 (part_cd, color_cd) 중복 제거
+                seen_codes: set = set()
+                unique_product_codes = []
+                for pc, cc in product_codes:
+                    if (pc, cc) not in seen_codes:
+                        seen_codes.add((pc, cc))
+                        unique_product_codes.append((pc, cc))
+                product_codes = unique_product_codes
+
                 stock_items = []
                 for pc, cc in product_codes:
                     info = fetch_stock_info(pc, cc)
                     if info:
                         stock_items.append(info)
+                    else:
+                        print(f"  [경고] 재고 조회 결과 없음: {pc}-{cc}")
                 # 단일 상품이면 기존 단일 dict, 복수면 리스트
                 stock_info = stock_items[0] if len(stock_items) == 1 else (stock_items if stock_items else None)
                 stock_summary  = format_stock_summary(stock_info)
