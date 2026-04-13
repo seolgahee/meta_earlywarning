@@ -275,12 +275,16 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
 
 
 def format_stock_summary(stock_info: dict) -> str:
-    """퍼마용: 물류재고 합계 + 주치 기반 가이드."""
+    """퍼마용: 물류재고 합계 + 가이드. MC 제품은 잔여 재고만 표기."""
     if not stock_info:
         return "재고 정보 없음"
     total_wh  = sum(s["wh"] for s in stock_info["sizes"])
-    wos       = stock_info.get("weeks_of_supply")
+    total_all = sum(s["total"] for s in stock_info["sizes"])
 
+    if stock_info.get("is_mc"):
+        return f"[MC 한정] 물류재고 {total_wh:,}개 / 전체 {total_all:,}개"
+
+    wos = stock_info.get("weeks_of_supply")
     if total_wh == 0:
         guide = "물류재고 소진 · 광고 중단 검토"
     elif wos is not None and wos < 1:
@@ -293,21 +297,25 @@ def format_stock_summary(stock_info: dict) -> str:
 
 
 def format_stock_md_guide(stock_info: dict) -> str:
-    """MD용: 사이즈별 물류재고 + 주치 기반 액션 가이드 (2줄)."""
+    """MD용: 사이즈별 물류재고 + 가이드. MC 제품은 잔여 재고만 표기."""
     if not stock_info:
         return ""
-    sizes      = stock_info["sizes"]
-    weekly_qty   = stock_info.get("weekly_qty", 0)
-    weekly_label = stock_info.get("weekly_label", "금주")
-    wos          = stock_info.get("weeks_of_supply")
-    total_wh     = sum(s["wh"] for s in sizes)
-    total_all    = sum(s["total"] for s in sizes)
+    sizes    = stock_info["sizes"]
+    total_wh = sum(s["wh"] for s in sizes)
 
     size_line = " / ".join(
         f"{s['size']} {s['wh']}개" + (f"(전체 {s['total']})" if s['total'] != s['wh'] else "")
         for s in sizes
     )
 
+    # MC 제품: 잔여 재고만 표기, 액션 가이드 없음
+    if stock_info.get("is_mc"):
+        return f"{size_line}"
+
+    weekly_qty   = stock_info.get("weekly_qty", 0)
+    weekly_label = stock_info.get("weekly_label", "금주")
+    wos          = stock_info.get("weeks_of_supply")
+    total_all    = sum(s["total"] for s in sizes)
     zero_wh_sizes = [s["size"] for s in sizes if s["wh"] == 0 and s["total"] > 0]
 
     if total_wh == 0:
