@@ -166,17 +166,25 @@ def extract_purchase_revenue(action_values: list) -> float:
 
 def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
     """
-    소재명 마지막 토큰에서 PART_CD-COLOR_CD 추출.
-    예: '260330_PQ_폴로티셔츠_TWSK16063-WHS' → ('TWSK16063', 'WHS')
-    패턴 미해당 시 (None, None) 반환.
+    소재명에서 PART_CD-COLOR_CD 또는 PART_CD 목록 추출.
+    - 단일: '..._TWSK16063-WHS' → [('TWSK16063', 'WHS')]
+    - 멀티: '..._TWWJ20863_TWSP20853_TWMT10361' → [('TWWJ20863', None), ...]
+    결과 없으면 빈 리스트.
     """
+    # 우선 PART_CD-COLOR_CD 패턴 시도
     match = re.search(r'_([A-Z0-9]+-[A-Z]+)$', ad_name)
     if match:
         code = match.group(1)
         parts = code.split('-', 1)
         if len(parts) == 2:
-            return parts[0], parts[1]
-    return None, None
+            return [(parts[0], parts[1])]
+
+    # 품번만 있는 패턴: _로 구분된 영문4자+숫자4~5자 형태
+    codes = re.findall(r'(?:^|_)([A-Z]{4}\d{4,5}[A-Z0-9]{0,2})(?=_|$)', ad_name)
+    if codes:
+        return [(c, None) for c in codes]
+
+    return []
 
 
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
@@ -200,7 +208,9 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         conn = get_snowflake_conn()
         cursor = conn.cursor()
 
-        # 사이즈별 물류재고 + 전체재고
+        # 사이즈별 물류재고 + 전체재고 (color_cd None이면 전체 컬러 합산)
+        color_filter = "AND d.COLOR_CD = %s" if color_cd else ""
+        stock_params = [STOCK_BRAND_CD, part_cd] + ([color_cd] if color_cd else []) + [STOCK_BRAND_CD]
         cursor.execute(f"""
             SELECT d.SIZE_CD,
                    SUM(d.WH_STOCK_QTY)  AS WH_STOCK,
@@ -211,39 +221,41 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
               ON d.PRDT_CD = p.PRDT_CD
             WHERE d.BRD_CD = %s
               AND d.PART_CD = %s
-              AND d.COLOR_CD = %s
+              {color_filter}
               AND d.START_DT = (
                   SELECT MAX(START_DT)
                   FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
                   WHERE BRD_CD = %s
               )
             GROUP BY d.SIZE_CD
-        """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD))
+        """, stock_params)
         stock_rows = cursor.fetchall()
 
-        # 금주 온라인 판매량 합산
         # 금주 판매량 조회 → 0이면 전주로 fallback
+        weekly_color_filter = "AND COLOR_CD = %s" if color_cd else ""
+        weekly_params = [STOCK_BRAND_CD, part_cd] + ([color_cd] if color_cd else [])
         cursor.execute(f"""
             SELECT SUM(SALE_NML_QTY_CNS_ON - SALE_RET_QTY_CNS_ON) AS WEEKLY_QTY
             FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_D
             WHERE BRD_CD = %s
               AND PART_CD = %s
-              AND COLOR_CD = %s
+              {weekly_color_filter}
               AND DT >= DATE_TRUNC('week', CURRENT_DATE)
-        """, (STOCK_BRAND_CD, part_cd, color_cd))
+        """, weekly_params)
         weekly_row = cursor.fetchone()
         weekly_qty_raw = int(weekly_row[0] or 0) if weekly_row else 0
 
         if weekly_qty_raw == 0:
+            prev_params = [STOCK_BRAND_CD, part_cd] + ([color_cd] if color_cd else [])
             cursor.execute(f"""
                 SELECT SUM(SALE_NML_QTY_CNS_ON - SALE_RET_QTY_CNS_ON) AS WEEKLY_QTY
                 FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_D
                 WHERE BRD_CD = %s
                   AND PART_CD = %s
-                  AND COLOR_CD = %s
+                  {weekly_color_filter}
                   AND DT >= DATE_TRUNC('week', CURRENT_DATE) - 7
                   AND DT <  DATE_TRUNC('week', CURRENT_DATE)
-            """, (STOCK_BRAND_CD, part_cd, color_cd))
+            """, prev_params)
             prev_row = cursor.fetchone()
             weekly_qty_raw = int(prev_row[0] or 0) if prev_row else 0
             weekly_label = "전주"
@@ -274,10 +286,16 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         return None
 
 
-def format_stock_summary(stock_info: dict) -> str:
-    """퍼마용: 물류재고 합계 + 가이드. MC 제품은 잔여 재고만 표기."""
+def format_stock_summary(stock_info) -> str:
+    """퍼마용: 물류재고 합계 + 가이드. MC 제품은 잔여 재고만 표기. 멀티 상품은 합산."""
     if not stock_info:
         return "재고 정보 없음"
+    # 멀티 상품 리스트인 경우 각각 요약
+    if isinstance(stock_info, list):
+        return " | ".join(
+            f"{s['prdt_nm'].split()[-1] if s.get('prdt_nm') else '?'}: {sum(sz['wh'] for sz in s['sizes'])}개"
+            for s in stock_info
+        )
     total_wh  = sum(s["wh"] for s in stock_info["sizes"])
     total_all = sum(s["total"] for s in stock_info["sizes"])
 
@@ -301,10 +319,18 @@ def format_stock_summary(stock_info: dict) -> str:
     return f"물류재고 {total_wh:,}개 · {guide}"
 
 
-def format_stock_md_guide(stock_info: dict) -> str:
-    """MD용: 사이즈별 물류재고 + 가이드. MC 제품은 잔여 재고만 표기."""
+def format_stock_md_guide(stock_info) -> str:
+    """MD용: 사이즈별 물류재고 + 가이드. MC 제품은 잔여 재고만 표기. 멀티 상품은 상품별 1줄씩."""
     if not stock_info:
         return ""
+    # 멀티 상품 리스트인 경우 각각 1줄로
+    if isinstance(stock_info, list):
+        lines = []
+        for s in stock_info:
+            nm = s.get("prdt_nm", "")
+            total_wh = sum(sz["wh"] for sz in s["sizes"])
+            lines.append(f"{nm}: 물류재고 {total_wh}개")
+        return "\n".join(lines)
     sizes    = stock_info["sizes"]
     total_wh = sum(s["wh"] for s in sizes)
 
@@ -1502,13 +1528,19 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                 else:
                     print(f"  -> 이미지 없음 (파트너십 광고 또는 영상 소재)")
 
-                part_cd, color_cd = extract_product_code(row["AD_NAME"])
-                stock_info = fetch_stock_info(part_cd, color_cd) if part_cd else None
-                if stock_info and stock_info.get("is_mc"):
-                    print(f"  -> MC 제품({stock_info['prdt_nm']}) - 재고 알럿 제외")
-                    stock_info = None
+                product_codes = extract_product_code(row["AD_NAME"])
+                stock_items = []
+                for pc, cc in product_codes:
+                    info = fetch_stock_info(pc, cc)
+                    if info:
+                        stock_items.append(info)
+                # 단일 상품이면 기존 단일 dict, 복수면 리스트
+                stock_info = stock_items[0] if len(stock_items) == 1 else (stock_items if stock_items else None)
                 stock_summary  = format_stock_summary(stock_info)
                 stock_md_guide = format_stock_md_guide(stock_info)
+                stock_product  = "_".join(
+                    f"{pc}" + (f"-{cc}" if cc else "") for pc, cc in product_codes
+                ) if product_codes else ""
                 if stock_info:
                     print(f"  -> 재고: {stock_summary}")
 
@@ -1537,7 +1569,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                     "stock_info":         stock_info,
                     "stock_summary":      stock_summary,
                     "stock_md_guide":     stock_md_guide,
-                    "stock_product":      f"{part_cd}-{color_cd}" if part_cd else "",
+                    "stock_product":      stock_product,
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
                 insight, guide = generate_ai_insight(alert_data)
