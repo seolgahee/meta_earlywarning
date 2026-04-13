@@ -54,7 +54,6 @@ BRAND          = "SERGIO_TACCHINI"
 ALERT_LOG_FILE = "alert_sent_log.json"
 
 SNOWFLAKE_STOCK_SCHEMA = os.getenv("SNOWFLAKE_STOCK_SCHEMA", "PRCS")
-SNOWFLAKE_STOCK_TABLE  = os.getenv("SNOWFLAKE_STOCK_TABLE",  "DB_SCS_W")
 STOCK_BRAND_CD         = os.getenv("STOCK_BRAND_CD", "ST")
 
 if not ACCESS_TOKEN or not AD_ACCOUNT_ID:
@@ -183,51 +182,148 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
 
 
-def fetch_stock_info(part_cd: str, color_cd: str) -> list[dict]:
+def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
     """
-    PRCS.DB_SCS_W에서 가장 최근 주차 기준 사이즈별 재고 조회.
-    반환: [{"size": "M", "total": 10, "wh": 8, "sh": 2}, ...]
-    실패 시 빈 리스트.
+    DW_SCS_DACUM(물류재고) + DW_SCS_D(금주 온라인 판매) 기반 재고/주치 조회.
+    반환: {
+        "prdt_nm": "W 하이웨이스트 우븐 플리츠 스커트",
+        "is_mc": False,
+        "sizes": [{"size": "M", "wh": 5, "total": 12}, ...],
+        "weekly_qty": 8,
+        "weeks_of_supply": 1.2,   # 물류재고합 / 금주판매량, None이면 판매 없음
+    }
+    실패 시 None.
     """
     if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD]):
-        return []
+        return None
     try:
         conn = get_snowflake_conn()
         cursor = conn.cursor()
+
+        # 사이즈별 물류재고 + 전체재고
         cursor.execute(f"""
-            SELECT SIZE_CD, STOCK_QTY, WH_STOCK_QTY, SH_STOCK_QTY
-            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.{SNOWFLAKE_STOCK_TABLE}
+            SELECT d.SIZE_CD,
+                   SUM(d.WH_STOCK_QTY)  AS WH_STOCK,
+                   SUM(d.STOCK_QTY)     AS TOTAL_STOCK,
+                   MAX(p.PRDT_NM)       AS PRDT_NM
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+            JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
+              ON d.PRDT_CD = p.PRDT_CD
+            WHERE d.BRD_CD = %s
+              AND d.PART_CD = %s
+              AND d.COLOR_CD = %s
+              AND d.START_DT = (
+                  SELECT MAX(START_DT)
+                  FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
+                  WHERE BRD_CD = %s
+              )
+            GROUP BY d.SIZE_CD
+        """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD))
+        stock_rows = cursor.fetchall()
+
+        # 금주 온라인 판매량 합산
+        # 금주 판매량 조회 → 0이면 전주로 fallback
+        cursor.execute(f"""
+            SELECT SUM(SALE_NML_QTY_CNS_ON - SALE_RET_QTY_CNS_ON) AS WEEKLY_QTY
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_D
             WHERE BRD_CD = %s
               AND PART_CD = %s
               AND COLOR_CD = %s
-              AND START_DT = (
-                  SELECT MAX(START_DT)
-                  FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.{SNOWFLAKE_STOCK_TABLE}
-                  WHERE BRD_CD = %s
-              )
-            ORDER BY SIZE_CD
-        """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD))
-        rows = cursor.fetchall()
+              AND DT >= DATE_TRUNC('week', CURRENT_DATE)
+        """, (STOCK_BRAND_CD, part_cd, color_cd))
+        weekly_row = cursor.fetchone()
+        weekly_qty_raw = int(weekly_row[0] or 0) if weekly_row else 0
+
+        if weekly_qty_raw == 0:
+            cursor.execute(f"""
+                SELECT SUM(SALE_NML_QTY_CNS_ON - SALE_RET_QTY_CNS_ON) AS WEEKLY_QTY
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_D
+                WHERE BRD_CD = %s
+                  AND PART_CD = %s
+                  AND COLOR_CD = %s
+                  AND DT >= DATE_TRUNC('week', CURRENT_DATE) - 7
+                  AND DT <  DATE_TRUNC('week', CURRENT_DATE)
+            """, (STOCK_BRAND_CD, part_cd, color_cd))
+            prev_row = cursor.fetchone()
+            weekly_qty_raw = int(prev_row[0] or 0) if prev_row else 0
+            weekly_label = "전주"
+        else:
+            weekly_label = "금주"
         conn.close()
-        result = [
-            {"size": row[0], "total": int(row[1] or 0), "wh": int(row[2] or 0), "sh": int(row[3] or 0)}
-            for row in rows
-        ]
-        result.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
-        return result
+
+        if not stock_rows:
+            return None
+
+        prdt_nm     = stock_rows[0][3] or ""
+        is_mc       = "MC" in prdt_nm.upper().split()
+        sizes       = [{"size": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
+        sizes.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
+        total_wh    = sum(s["wh"] for s in sizes)
+        weeks_of_supply = round(total_wh / weekly_qty_raw, 1) if weekly_qty_raw > 0 else None
+
+        return {
+            "prdt_nm":         prdt_nm,
+            "is_mc":           is_mc,
+            "sizes":           sizes,
+            "weekly_qty":      weekly_qty_raw,
+            "weekly_label":    weekly_label,
+            "weeks_of_supply": weeks_of_supply,
+        }
     except Exception as e:
         print(f"[경고] 재고 조회 실패 ({part_cd}-{color_cd}): {e}")
-        return []
+        return None
 
 
-def format_stock_summary(stock_info: list[dict]) -> str:
-    """재고 총합 요약 문자열. 예: '총 45개 (창고 38 / 매장 7)'"""
+def format_stock_summary(stock_info: dict) -> str:
+    """퍼마용: 물류재고 합계 + 주치 기반 가이드."""
     if not stock_info:
         return "재고 정보 없음"
-    total = sum(s["total"] for s in stock_info)
-    wh    = sum(s["wh"]    for s in stock_info)
-    sh    = sum(s["sh"]    for s in stock_info)
-    return f"총 {total:,}개 (창고 {wh:,} / 매장 {sh:,})"
+    total_wh  = sum(s["wh"] for s in stock_info["sizes"])
+    wos       = stock_info.get("weeks_of_supply")
+
+    if total_wh == 0:
+        guide = "물류재고 소진 · 광고 중단 검토"
+    elif wos is not None and wos < 1:
+        guide = f"~{wos}주치 · 1주 내 소진 예상 · 예산 증액 보류"
+    elif wos is not None and wos < 2:
+        guide = f"~{wos}주치 · 2주 내 소진 예상 · MD 확인 필요"
+    else:
+        guide = "재고 여유 · 일cap 상향 검토 가능"
+    return f"물류재고 {total_wh:,}개 · {guide}"
+
+
+def format_stock_md_guide(stock_info: dict) -> str:
+    """MD용: 사이즈별 물류재고 + 주치 기반 액션 가이드 (2줄)."""
+    if not stock_info:
+        return ""
+    sizes      = stock_info["sizes"]
+    weekly_qty   = stock_info.get("weekly_qty", 0)
+    weekly_label = stock_info.get("weekly_label", "금주")
+    wos          = stock_info.get("weeks_of_supply")
+    total_wh     = sum(s["wh"] for s in sizes)
+    total_all    = sum(s["total"] for s in sizes)
+
+    size_line = " / ".join(
+        f"{s['size']} {s['wh']}개" + (f"(전체 {s['total']})" if s['total'] != s['wh'] else "")
+        for s in sizes
+    )
+
+    zero_wh_sizes = [s["size"] for s in sizes if s["wh"] == 0 and s["total"] > 0]
+
+    if total_wh == 0:
+        action = f"[즉시] 물류재고 0 (전체 {total_all}개) -> 매장->물류 이동 또는 추가 발주"
+    elif wos is not None and wos < 1:
+        action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매) -> 금주 내 물류 입고 스케줄 확인"
+    elif wos is not None and wos < 2:
+        action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매) -> RT 요청 검토"
+    else:
+        wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
+        action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+
+    if zero_wh_sizes:
+        action += f" | {', '.join(zero_wh_sizes)} 물류재고 없음 주의"
+
+    return f"{size_line}\n{action}"
 
 
 def detect_channel(campaign_name: str, adset_name: str) -> str:
@@ -815,6 +911,17 @@ def build_email_html(alerts: list) -> str:
             <p style="margin:0 0 4px;font-size:11px;color:#888;font-weight:bold;">액션 가이드</p>
             <p style="margin:0;font-size:13px;color:#333;">{a['action_guide']}</p>
           </div>
+          {(
+              '<div style="margin-top:12px;padding:12px;background:#f1f8e9;border-left:4px solid #558b2f;border-radius:4px;">'
+              f'<p style="margin:0 0 4px;font-size:11px;color:#558b2f;font-weight:bold;">📦 재고 현황 ({a.get("stock_product","")})</p>'
+              f'<p style="margin:0 0 6px;font-size:13px;color:#333;">{a.get("stock_summary","")}</p>'
+              + (
+                  '<p style="margin:6px 0 2px;font-size:11px;color:#888;font-weight:bold;">MD 액션 가이드</p>'
+                  f'<p style="margin:0;font-size:13px;color:#333;white-space:pre-line;">{a.get("stock_md_guide","")}</p>'
+                  if a.get("stock_md_guide") else ""
+              ) +
+              '</div>'
+          ) if a.get("stock_product") else ""}
         </div>
         """
 
@@ -967,6 +1074,18 @@ def send_slack_alert(alerts: list) -> None:
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":bulb: *AI 인사이트*\n{a.get('ai_insight', '')}"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":dart: *액션 가이드*\n{a.get('action_guide', '')}"}},
             ]
+
+            # 재고 섹션 추가 (상품코드 파싱된 경우만)
+            if a.get("stock_product"):
+                stock_text = (
+                    f":package: *재고 현황* (`{a['stock_product']}`)\n"
+                    f"{a.get('stock_summary', '재고 정보 없음')}"
+                )
+                md_guide = a.get("stock_md_guide", "")
+                if md_guide:
+                    stock_text += f"\n\n*MD 액션 가이드*\n{md_guide}"
+                blocks.append({"type": "divider"})
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": stock_text}})
 
         # 소재 이미지가 있으면 상단에 추가
         if a.get("creative_image_url"):
@@ -1364,6 +1483,16 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                 else:
                     print(f"  -> 이미지 없음 (파트너십 광고 또는 영상 소재)")
 
+                part_cd, color_cd = extract_product_code(row["AD_NAME"])
+                stock_info = fetch_stock_info(part_cd, color_cd) if part_cd else None
+                if stock_info and stock_info.get("is_mc"):
+                    print(f"  -> MC 제품({stock_info['prdt_nm']}) - 재고 알럿 제외")
+                    stock_info = None
+                stock_summary  = format_stock_summary(stock_info)
+                stock_md_guide = format_stock_md_guide(stock_info)
+                if stock_info:
+                    print(f"  -> 재고: {stock_summary}")
+
                 alert_data = {
                     "alert_type":         "PERFORMANCE",
                     "action_type":        action_type,
@@ -1386,6 +1515,10 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                     "ctr_12h":            row["ctr_12h"],
                     "repeat_count":       repeat_count,
                     "creative_image_url": creative_image_url,
+                    "stock_info":         stock_info,
+                    "stock_summary":      stock_summary,
+                    "stock_md_guide":     stock_md_guide,
+                    "stock_product":      f"{part_cd}-{color_cd}" if part_cd else "",
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
                 insight, guide = generate_ai_insight(alert_data)
