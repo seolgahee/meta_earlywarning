@@ -282,7 +282,12 @@ def format_stock_summary(stock_info: dict) -> str:
     total_all = sum(s["total"] for s in stock_info["sizes"])
 
     if stock_info.get("is_mc"):
-        return f"[MC 한정] 물류재고 {total_wh:,}개 / 전체 {total_all:,}개"
+        if total_all == 0:
+            return "[MC 한정] 완판 · 예산 다른 소재로 이동"
+        elif total_wh == 0:
+            return f"[MC 한정] 온라인 완판 · 매장 재고 {total_all:,}개 잔여"
+        else:
+            return f"[MC 한정] 물류재고 {total_wh:,}개 · 소진 유도 · 예산 유지 또는 소폭 증액"
 
     wos = stock_info.get("weeks_of_supply")
     if total_wh == 0:
@@ -308,9 +313,15 @@ def format_stock_md_guide(stock_info: dict) -> str:
         for s in sizes
     )
 
-    # MC 제품: 잔여 재고만 표기, 액션 가이드 없음
+    # MC 제품: 잔여 재고 + 소진 목표 가이드
     if stock_info.get("is_mc"):
-        return f"{size_line}"
+        total_all_mc = sum(s["total"] for s in sizes)
+        if total_all_mc == 0:
+            return f"{size_line}\n완판 완료"
+        elif total_wh == 0:
+            return f"{size_line}\n온라인 완판 · 매장 재고 {total_all_mc}개 잔여"
+        else:
+            return f"{size_line}\n잔여 {total_wh}개 · 소진 목표 유지"
 
     weekly_qty   = stock_info.get("weekly_qty", 0)
     weekly_label = stock_info.get("weekly_label", "금주")
