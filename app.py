@@ -55,6 +55,7 @@ ALERT_LOG_FILE = "alert_sent_log.json"
 
 SNOWFLAKE_STOCK_SCHEMA = os.getenv("SNOWFLAKE_STOCK_SCHEMA", "PRCS")
 STOCK_BRAND_CD         = os.getenv("STOCK_BRAND_CD", "ST")
+JASAMOL_SHOP_ID        = os.getenv("JASAMOL_SHOP_ID", "30001")  # 온라인쇼핑몰(직) = 자사몰
 
 if not ACCESS_TOKEN or not AD_ACCOUNT_ID:
     print("[오류] .env에 META_ACCESS_TOKEN, META_AD_ACCOUNT_ID 값이 없습니다.")
@@ -245,36 +246,22 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
             """, (STOCK_BRAND_CD, part_cd, STOCK_BRAND_CD))
         stock_rows = cursor.fetchall()
 
-        # 금주 판매량 조회 → 0이면 전주로 fallback
-        weekly_color_filter = "AND COLOR_CD = %s" if color_cd else ""
-        weekly_params = [STOCK_BRAND_CD, part_cd] + ([color_cd] if color_cd else [])
+        # 최근 7일 자사몰(온라인쇼핑몰 직영) 판매량 (DW_SH_SCS_D, SHOP_ID=자사몰)
+        color_filter = "AND COLOR_CD = %s" if color_cd else ""
+        sale_params = [STOCK_BRAND_CD, JASAMOL_SHOP_ID, part_cd] + ([color_cd] if color_cd else [])
         cursor.execute(f"""
-            SELECT SUM(SALE_NML_QTY_CNS_ON - SALE_RET_QTY_CNS_ON) AS WEEKLY_QTY
-            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_D
+            SELECT SUM(SALE_NML_QTY - SALE_RET_QTY) AS SALE_QTY
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SH_SCS_D
             WHERE BRD_CD = %s
+              AND SHOP_ID = %s
               AND PART_CD = %s
-              {weekly_color_filter}
-              AND DT >= DATE_TRUNC('week', CURRENT_DATE)
-        """, weekly_params)
-        weekly_row = cursor.fetchone()
-        weekly_qty_raw = int(weekly_row[0] or 0) if weekly_row else 0
-
-        if weekly_qty_raw == 0:
-            prev_params = [STOCK_BRAND_CD, part_cd] + ([color_cd] if color_cd else [])
-            cursor.execute(f"""
-                SELECT SUM(SALE_NML_QTY_CNS_ON - SALE_RET_QTY_CNS_ON) AS WEEKLY_QTY
-                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_D
-                WHERE BRD_CD = %s
-                  AND PART_CD = %s
-                  {weekly_color_filter}
-                  AND DT >= DATE_TRUNC('week', CURRENT_DATE) - 7
-                  AND DT <  DATE_TRUNC('week', CURRENT_DATE)
-            """, prev_params)
-            prev_row = cursor.fetchone()
-            weekly_qty_raw = int(prev_row[0] or 0) if prev_row else 0
-            weekly_label = "전주"
-        else:
-            weekly_label = "금주"
+              {color_filter}
+              AND DT >= CURRENT_DATE - 7
+              AND DT <  CURRENT_DATE
+        """, sale_params)
+        sale_row = cursor.fetchone()
+        sale_7d   = int(sale_row[0] or 0) if sale_row else 0
+        daily_avg = round(sale_7d / 7, 1)
         conn.close()
 
         if not stock_rows:
@@ -289,27 +276,27 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
             sizes = [{"size": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
             sizes.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
             total_wh = sum(s["wh"] for s in sizes)
-            weeks_of_supply = round(total_wh / weekly_qty_raw, 1) if weekly_qty_raw > 0 else None
+            days_of_supply = round(total_wh / daily_avg, 0) if daily_avg > 0 else None
             return {
-                "prdt_nm":         prdt_nm,
-                "is_mc":           is_mc,
-                "sizes":           sizes,
-                "weekly_qty":      weekly_qty_raw,
-                "weekly_label":    weekly_label,
-                "weeks_of_supply": weeks_of_supply,
+                "prdt_nm":        prdt_nm,
+                "is_mc":          is_mc,
+                "sizes":          sizes,
+                "sale_7d":        sale_7d,
+                "daily_avg":      daily_avg,
+                "days_of_supply": days_of_supply,
             }
         else:
             # 컬러별
             colors = [{"color": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
             total_wh = sum(c["wh"] for c in colors)
-            weeks_of_supply = round(total_wh / weekly_qty_raw, 1) if weekly_qty_raw > 0 else None
+            days_of_supply = round(total_wh / daily_avg, 0) if daily_avg > 0 else None
             return {
-                "prdt_nm":         prdt_nm,
-                "is_mc":           is_mc,
-                "colors":          colors,
-                "weekly_qty":      weekly_qty_raw,
-                "weekly_label":    weekly_label,
-                "weeks_of_supply": weeks_of_supply,
+                "prdt_nm":        prdt_nm,
+                "is_mc":          is_mc,
+                "colors":         colors,
+                "sale_7d":        sale_7d,
+                "daily_avg":      daily_avg,
+                "days_of_supply": days_of_supply,
             }
     except Exception as e:
         print(f"[경고] 재고 조회 실패 ({part_cd}-{color_cd}): {e}")
@@ -346,25 +333,31 @@ def format_stock_summary(stock_info) -> str:
     items = _stock_items(stock_info)
     total_wh  = sum(s["wh"] for s in items)
     total_all = sum(s["total"] for s in items)
+    prdt_nm   = stock_info.get("prdt_nm") or ""
+    prefix    = f"{prdt_nm}: " if prdt_nm else ""
 
     if stock_info.get("is_mc"):
         if total_all == 0:
-            return "[MC 한정] 완판 · 예산 다른 소재로 이동"
+            return f"{prefix}[MC 한정] 완판 · 예산 다른 소재로 이동"
         elif total_wh == 0:
-            return f"[MC 한정] 온라인 완판 · 매장 재고 {total_all:,}개 잔여"
+            return f"{prefix}[MC 한정] 온라인 완판 · 매장 재고 {total_all:,}개 잔여"
         else:
-            return f"[MC 한정] 물류재고 {total_wh:,}개 · 소진 유도 · 예산 유지 또는 소폭 증액"
+            return f"{prefix}[MC 한정] 물류재고 {total_wh:,}개 · 소진 유도 · 예산 유지 또는 소폭 증액"
 
-    wos = stock_info.get("weeks_of_supply")
+    dos       = stock_info.get("days_of_supply")
+    daily_avg = stock_info.get("daily_avg", 0)
+    sale_7d   = stock_info.get("sale_7d", 0)
+    sale_info = f"최근 7일 {sale_7d}개 판매 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
     if total_wh == 0:
-        guide = "물류재고 소진 · 광고 중단 검토"
-    elif wos is not None and wos < 1:
-        guide = f"~{wos}주치 · 1주 내 소진 예상 · 예산 증액 보류"
-    elif wos is not None and wos < 2:
-        guide = f"~{wos}주치 · 2주 내 소진 예상 · MD 확인 필요"
+        guide = f"물류창고 소진 · 광고 중단 검토 · {sale_info}"
+    elif dos is not None and dos < 7:
+        guide = f"~{int(dos)}일치 · 1주 내 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info}"
+    elif dos is not None and dos < 14:
+        guide = f"~{int(dos)}일치 · 2주 내 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info}"
     else:
-        guide = "재고 여유 · 일cap 상향 검토 가능"
-    return f"물류재고 {total_wh:,}개 · {guide}"
+        dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
+        guide = f"재고 여유 · {dos_str} · 일cap 상향 검토 가능 · {sale_info}"
+    return f"{prefix}물류창고 {total_wh:,}개 · {guide}"
 
 
 def format_stock_md_guide(stock_info) -> str:
@@ -372,59 +365,50 @@ def format_stock_md_guide(stock_info) -> str:
     if not stock_info:
         return ""
     # 멀티 상품 리스트인 경우 상품별 컬러/재고 + 액션 가이드
+    def _action(total_wh, total_all, dos, sale_7d, daily_avg):
+        sale_info = f"자사몰 최근 7일 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
+        if total_wh == 0:
+            return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요"
+        elif dos is not None and dos < 7:
+            return f"[긴급] ~{int(dos)}일치 · {sale_info} → 광고 전환 증가 예상, 자사몰 물류 즉시 보충 필수"
+        elif dos is not None and dos < 14:
+            return f"[주의] ~{int(dos)}일치 · {sale_info} → 전환 지속 시 2주 내 소진 예상, 자사몰로 물류 이동 검토"
+        else:
+            dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
+            return f"[안정] {dos_str} · {sale_info} → 광고 지속 운영 가능"
+
     if isinstance(stock_info, list):
         lines = []
         for s in stock_info:
-            nm = s.get("prdt_nm", "")
-            wos          = s.get("weeks_of_supply")
-            weekly_qty   = s.get("weekly_qty", 0)
-            weekly_label = s.get("weekly_label", "금주")
+            nm        = s.get("prdt_nm", "")
+            dos       = s.get("days_of_supply")
+            sale_7d   = s.get("sale_7d", 0)
+            daily_avg = s.get("daily_avg", 0)
             if s.get("colors") is not None:
                 color_line = _format_color_breakdown(s)
-                total_wh = sum(c["wh"] for c in s["colors"])
-                if total_wh == 0:
-                    action = "[즉시] 물류재고 0 -> 매장->물류 이동 또는 추가 발주"
-                elif wos is not None and wos < 1:
-                    action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-                elif wos is not None and wos < 2:
-                    action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-                else:
-                    wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
-                    action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+                total_wh   = sum(c["wh"] for c in s["colors"])
+                total_all  = sum(c["total"] for c in s["colors"])
+                action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
                 lines.append(f"{nm}: {color_line}\n{action}")
             else:
-                szs = _stock_items(s)
+                szs       = _stock_items(s)
                 total_wh  = sum(sz["wh"] for sz in szs)
                 total_all = sum(sz["total"] for sz in szs)
-                if total_wh == 0:
-                    action = f"[즉시] 물류재고 0 (전체 {total_all}개) -> 매장->물류 이동 또는 추가 발주"
-                elif wos is not None and wos < 1:
-                    action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-                elif wos is not None and wos < 2:
-                    action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-                else:
-                    wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
-                    action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-                lines.append(f"{nm}: 물류재고 {total_wh}개\n{action}")
+                action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
+                lines.append(f"{nm}: 온라인 물류창고 {total_wh}개\n{action}")
         return "\n\n".join(lines)
+
     items    = _stock_items(stock_info)
     total_wh = sum(s["wh"] for s in items)
+    dos       = stock_info.get("days_of_supply")
+    sale_7d   = stock_info.get("sale_7d", 0)
+    daily_avg = stock_info.get("daily_avg", 0)
 
     # 컬러별 데이터인 경우 (color_cd 없이 조회된 단일 상품)
     if stock_info.get("colors") is not None:
         color_line = _format_color_breakdown(stock_info)
-        weekly_qty   = stock_info.get("weekly_qty", 0)
-        weekly_label = stock_info.get("weekly_label", "금주")
-        wos          = stock_info.get("weeks_of_supply")
-        if total_wh == 0:
-            action = "[즉시] 물류재고 0 -> 매장->물류 이동 또는 추가 발주"
-        elif wos is not None and wos < 1:
-            action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-        elif wos is not None and wos < 2:
-            action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
-        else:
-            wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
-            action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+        total_all  = sum(c["total"] for c in stock_info["colors"])
+        action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
         return f"{color_line}\n{action}"
 
     sizes = items
@@ -437,30 +421,18 @@ def format_stock_md_guide(stock_info) -> str:
     if stock_info.get("is_mc"):
         total_all_mc = sum(s["total"] for s in sizes)
         if total_all_mc == 0:
-            return f"{size_line}\n완판 완료"
+            return f"{size_line}\n완판 완료 → 광고 중단"
         elif total_wh == 0:
-            return f"{size_line}\n온라인 완판 · 매장 재고 {total_all_mc}개 잔여"
+            return f"{size_line}\n온라인 물류창고 소진 (매장 재고 {total_all_mc}개 잔여) → 광고 중단 검토"
         else:
-            return f"{size_line}\n잔여 {total_wh}개 · 소진 목표 유지"
+            return f"{size_line}\n잔여 {total_wh}개 · 소진 목표 유지 → 광고 지속"
 
-    weekly_qty   = stock_info.get("weekly_qty", 0)
-    weekly_label = stock_info.get("weekly_label", "금주")
-    wos          = stock_info.get("weeks_of_supply")
-    total_all    = sum(s["total"] for s in sizes)
+    total_all     = sum(s["total"] for s in sizes)
     zero_wh_sizes = [s["size"] for s in sizes if s["wh"] == 0 and s["total"] > 0]
-
-    if total_wh == 0:
-        action = f"[즉시] 물류재고 0 (전체 {total_all}개) -> 매장->물류 이동 또는 추가 발주"
-    elif wos is not None and wos < 1:
-        action = f"[단기] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매) -> 금주 내 물류 입고 스케줄 확인"
-    elif wos is not None and wos < 2:
-        action = f"[2주] ~{wos}주치 ({total_wh}개 / {weekly_label} {weekly_qty}개 판매) -> RT 요청 검토"
-    else:
-        wos_str = f"~{wos}주치" if wos else "판매 데이터 없음"
-        action = f"[안정] {wos_str} ({total_wh}개 / {weekly_label} {weekly_qty}개 판매)"
+    action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
 
     if zero_wh_sizes:
-        action += f" | {', '.join(zero_wh_sizes)} 물류재고 없음 주의"
+        action += f" | {', '.join(zero_wh_sizes)} 물류창고 재고 없음 주의"
 
     return f"{size_line}\n{action}"
 
