@@ -629,64 +629,29 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
 
     is_br = alert.get("alert_type") == "BR"
 
-    # subtype별 Gemini 작성 지침
+    # subtype별 Gemini AI_INSIGHT 작성 지침 (왜 반응이 좋아졌는지만)
     subtype_context = {
-        # ── Performance ──
-        "CLICK_SURGE": (
-            "AI 인사이트: CTR이 급등한 이유를 썸네일·카피 반응 관점에서 해석하세요. 전환은 아직 0건임을 반영하세요. "
-            "ACTION 가이드: 랜딩 페이지 점검과 전환 유도형 카피/오퍼 변형 테스트를 안내하세요."
-        ),
-        "CONVERSION_EARLY": (
-            "AI 인사이트: 소량이지만 전환이 발생하고 ROAS가 기준치를 상회하는 이유를 데이터 기반으로 해석하세요. "
-            "ACTION 가이드: 6시간 추가 관찰, 유사 소재 2~3종 제작, ASC 캠페인 일cap 상향 검토를 안내하세요."
-        ),
-        "CLICK_TO_CONVERT_GAP": (
-            "AI 인사이트: 클릭은 발생했지만 전환 효율이 낮은 이유를 랜딩·상품·오퍼 관점에서 해석하세요. "
-            "ACTION 가이드: 상세페이지·가격·혜택 점검과 카피/오퍼 수정 테스트를 안내하세요."
-        ),
-        "CONVERSION_SURGE": (
-            "AI 인사이트: 직전 6시간 대비 전환율과 ROAS가 모두 개선된 이유를 데이터 기반으로 해석하세요. "
-            "ACTION 가이드: ASC 캠페인 일cap 상향 검토와 해당 소재 내 상품 기반 전환형 신규 소재 2~3종 제작을 안내하세요."
-        ),
-        "CONVERSION_SURGE_COLD": (
-            "AI 인사이트: 직전 6시간 전환이 없다가 첫 전환이 발생한 이유를 소재/상품 관점에서 해석하세요. "
-            "ACTION 가이드: 첫 전환 발생이므로 일cap 상향은 보류하고, 다음 6시간 추이 관찰과 소재 저장을 안내하세요."
-        ),
-        "DEFAULT": (
-            "AI 인사이트: 성과 개선 요인을 데이터 기반으로 해석하세요. "
-            "ACTION 가이드: 캠페인 일cap 상향 검토와 소재 확장 방향으로 운영 액션을 안내하세요."
-        ),
-        # ── BR(브랜딩) ──
-        "BR_CTR_SURGE": (
-            "AI 인사이트: 브랜딩 소재의 CTR이 상승한 이유를 썸네일·카피 반응 관점에서 해석하세요. "
-            "ACTION 가이드: 반응이 좋은 소재 컨셉을 기반으로 유사 소재 2~3종 추가 제작을 안내하세요. 전환 지표는 언급하지 마세요."
-        ),
-        "BR_CTR_DROP": (
-            "AI 인사이트: 브랜딩 소재의 CTR이 하락한 이유를 소재 피로도·노출 포화 관점에서 해석하세요. "
-            "ACTION 가이드: 새로운 썸네일·카피 컨셉으로 소재 교체 또는 신규 소재 투입을 안내하세요. 전환 지표는 언급하지 마세요."
-        ),
+        "CLICK_SURGE":          "CTR이 급등한 이유를 썸네일·카피 반응 관점에서 해석하세요. 전환은 아직 0건임을 반영하세요.",
+        "CONVERSION_EARLY":     "소량이지만 전환이 발생하고 ROAS가 기준치를 상회하는 이유를 데이터 기반으로 해석하세요.",
+        "CLICK_TO_CONVERT_GAP": "클릭은 발생했지만 전환 효율이 낮은 이유를 랜딩·상품·오퍼 관점에서 해석하세요.",
+        "CONVERSION_SURGE":     "직전 6시간 대비 전환율과 ROAS가 모두 개선된 이유를 데이터 기반으로 해석하세요.",
+        "CONVERSION_SURGE_COLD":"직전 6시간 전환이 없다가 첫 전환이 발생한 이유를 소재/상품 관점에서 해석하세요.",
+        "DEFAULT":              "성과 개선 요인을 데이터 기반으로 해석하세요.",
+        "BR_CTR_SURGE":         "브랜딩 소재의 CTR이 상승한 이유를 썸네일·카피 반응 관점에서 해석하세요. 전환 지표는 언급하지 마세요.",
+        "BR_CTR_DROP":          "브랜딩 소재의 CTR이 하락한 이유를 소재 피로도·노출 포화 관점에서 해석하세요. 전환 지표는 언급하지 마세요.",
     }
-
-    # 파트너십 광고세트인 경우 모든 subtype 지침을 인플루언서 관점으로 오버라이드
     if is_partnership:
-        partnership_guide = (
-            "AI 인사이트: 인플루언서가 게재한 파트너십 소재의 반응이 좋아진 이유를 소재 특성·타겟 공감 관점에서 해석하세요. "
-            "ACTION 가이드: 해당 인플루언서의 또 다른 소재 추가를 제안하고, ASC 캠페인 일cap 상향으로 노출을 증대할 것을 안내하세요. "
-            "브랜드가 직접 제작한 소재 추가나 소재 자체 수정은 절대 언급하지 마세요."
-        )
-        subtype_context = {k: partnership_guide for k in subtype_context}
+        subtype_context = {k: "인플루언서가 게재한 파트너십 소재의 반응이 좋아진 이유를 소재 특성·타겟 공감 관점에서 해석하세요." for k in subtype_context}
 
     if is_br:
         prompt = f"""
 당신은 디지털 광고 브랜딩 마케터입니다.
-아래 Meta 브랜딩 광고 데이터를 보고 AI 인사이트와 액션 가이드를 작성하세요.
+아래 Meta 브랜딩 광고 데이터를 보고 AI 인사이트(왜 CTR 변화가 발생했는지)만 작성하세요.
 전환(구매), ROAS, 매출 관련 내용은 절대 언급하지 마세요.
 
 [광고 정보]
 - 캠페인: {alert['campaign_name']}
-- 광고세트: {alert['adset_name']}
 - 광고소재: {alert['ad_name']}
-- 채널: {alert['channel']}
 - alert 유형: {alert_subtype}
 
 [성과 데이터]
@@ -696,34 +661,22 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
 
 [작성 지침]
 - {subtype_context.get(alert_subtype, subtype_context['BR_CTR_SURGE'])}
-- AI_INSIGHT는 "왜" CTR 변화가 발생했는지 한 문장으로 해석
-- ACTION_GUIDE는 소재 확장·교체 중심으로 한~두 문장 구체적 지시
 - 입력 데이터만 근거로 해석, 외부 요인 추정 금지
 - 숫자 과장 금지, 한국어, 짧고 실무적인 톤
 
 [출력 형식] (반드시 아래 형식 그대로)
 AI_INSIGHT: (한 문장)
-ACTION_GUIDE: (한~두 문장)
 """.strip()
     else:
-        partnership_note = (
-            "\n[파트너십 광고 주의사항]\n"
-            "이 광고는 인플루언서가 직접 게재한 파트너십(협업) 광고입니다. 브랜드가 소재를 직접 제작·수정할 수 없습니다.\n"
-            "따라서 '신규 소재 제작', '소재 컨셉 변경', '카피 수정' 등의 가이드는 절대 금지합니다.\n"
-            "액션 가이드는 반드시 ① 해당 인플루언서의 또 다른 소재 추가 제안 ② ASC 캠페인 일cap 상향으로 노출 증대 두 가지로만 작성하세요."
-        ) if is_partnership else ""
-
         prompt = f"""
 당신은 디지털 광고 퍼포먼스 마케터입니다.
-아래 Meta 광고 데이터를 보고 AI 인사이트(왜 반응이 좋아졌는지 해석)와 액션 가이드(운영자가 당장 해야 할 행동)를 각각 작성하세요.
+아래 Meta 광고 데이터를 보고 AI 인사이트(왜 반응이 좋아졌는지)만 한 문장으로 작성하세요.
 
 [광고 정보]
 - 캠페인: {alert['campaign_name']}
-- 광고세트: {alert['adset_name']}
 - 광고소재: {alert['ad_name']}
-- 채널: {alert['channel']}
 - alert 유형: {alert_subtype} / {action_type}
-{partnership_note}
+
 [성과 데이터]
 - Spend_6h: {alert['spend_6h']:,.0f}원
 - Clicks_6h: {int(alert.get('clicks_6h', 0))}회
@@ -734,15 +687,11 @@ ACTION_GUIDE: (한~두 문장)
 
 [작성 지침]
 - {subtype_context.get(alert_subtype, subtype_context['DEFAULT'])}
-- AI_INSIGHT는 "왜" 반응이 좋아졌는지 한 문장으로 해석
-- ACTION_GUIDE는 운영자가 "무엇을" 해야 하는지 한~두 문장으로 구체적 지시
 - 입력 데이터만 근거로 해석, 외부 요인 추정 금지
 - 숫자 과장 금지, 한국어, 짧고 실무적인 톤
-- ASC 캠페인은 소재(광고) 단위 예산 조정이 불가하므로, 예산 관련 액션은 반드시 "캠페인 일cap 상향" 표현만 사용할 것. "소재 예산 증액", "예산을 늘리세요", "예산 증액" 등의 표현은 절대 사용 금지.
 
 [출력 형식] (반드시 아래 형식 그대로)
 AI_INSIGHT: (한 문장)
-ACTION_GUIDE: (한~두 문장)
 """.strip()
 
     try:
@@ -752,16 +701,73 @@ ACTION_GUIDE: (한~두 문장)
         )
         text    = response.text.strip()
         insight = fallback[0]
-        guide   = fallback[1]
         for line in text.splitlines():
             if line.startswith("AI_INSIGHT:"):
                 insight = line.replace("AI_INSIGHT:", "").strip()
-            elif line.startswith("ACTION_GUIDE:"):
-                guide = line.replace("ACTION_GUIDE:", "").strip()
-        return insight, guide
+        return insight, fallback[1]
     except Exception as e:
         print(f"[경고] Gemini 호출 실패 ({e}) - fallback 사용")
         return fallback
+
+
+def build_action_guide(alert: dict, stock_info) -> str:
+    """
+    룰 기반 액션 가이드 생성.
+    ① 재고 경고 (stock_info 기반)
+    ② 소재 액션 (파트너십 여부 분기)
+    ③ 일cap 상향 (재고 여유 + 전환 충분할 때)
+    """
+    alert_subtype  = alert.get("alert_subtype", "DEFAULT")
+    action_type    = alert.get("action_type", "")
+    is_partnership = "파트너십" in alert.get("adset_name", "")
+    is_br          = alert.get("alert_type") == "BR"
+
+    # ── ① 재고 경고 ──
+    stock_warn = ""
+    if stock_info and not isinstance(stock_info, list):
+        items    = _stock_items(stock_info) if not stock_info.get("colors") else stock_info["colors"]
+        total_wh = sum(s["wh"] for s in items)
+        dos      = stock_info.get("days_of_supply")
+        if total_wh == 0:
+            stock_warn = "🚨 온라인 물류창고 재고 없음 → 광고 중단 후 자사몰 물류 이동 필요"
+        elif dos is not None and dos < 7:
+            stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰 물류 즉시 보충 필수"
+        elif dos is not None and dos < 14:
+            stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰로 물류 이동 검토"
+
+    # ── ② 소재 액션 ──
+    if is_br:
+        if alert_subtype == "BR_CTR_DROP":
+            creative_action = "새로운 썸네일·카피 컨셉으로 소재 교체 또는 신규 소재 투입"
+        else:
+            creative_action = "반응 좋은 소재 컨셉 기반 유사 소재 2~3종 추가 제작"
+    elif is_partnership:
+        creative_action = "해당 인플루언서 소재 추가 확장"
+    else:
+        if alert_subtype in ("CLICK_SURGE", "CLICK_TO_CONVERT_GAP"):
+            creative_action = "랜딩 페이지·상품 상세 점검 및 전환 유도형 카피/오퍼 변형 테스트"
+        else:
+            creative_action = "해당 제품 기반 전환형 소재 2~3종 추가 제작"
+
+    # ── ③ 일cap 상향 여부 ──
+    cap_action = ""
+    if not is_br:
+        if total_wh == 0 if stock_info and not isinstance(stock_info, list) else False:
+            cap_action = ""  # 재고 없으면 일cap 상향 보류
+        elif alert_subtype == "CONVERSION_SURGE_COLD":
+            cap_action = "다음 6h 추이 관찰 후 일cap 상향 검토"
+        elif alert_subtype in ("CLICK_SURGE", "CLICK_TO_CONVERT_GAP"):
+            cap_action = ""  # 전환 없거나 갭 있으면 보류
+        elif action_type in ("CAMPAIGN_SCALE", "CONVERSION_SURGE", "CONVERSION_EARLY"):
+            cap_action = "ASC 캠페인 일cap 상향"
+
+    # ── 조합 ──
+    actions = [a for a in [creative_action, cap_action] if a]
+    action_line = " / ".join(f"{'①②③'[i]} {a}" for i, a in enumerate(actions))
+
+    if stock_warn:
+        return f"{stock_warn}\n→ {action_line}" if action_line else stock_warn
+    return action_line
 
 
 # ─────────────────────────────────────────
@@ -1536,11 +1542,11 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                     "creative_image_url": creative_image_url,
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
-                insight, guide = generate_ai_insight(br_alert_data)
+                insight, _ = generate_ai_insight(br_alert_data)
                 br_alert_data["ai_insight"]   = insight
-                br_alert_data["action_guide"] = guide
+                br_alert_data["action_guide"] = build_action_guide(br_alert_data, None)
                 print(f"  AI: {insight}")
-                print(f"  가이드: {guide}")
+                print(f"  가이드: {br_alert_data['action_guide']}")
                 br_alerts.append(br_alert_data)
             else:
                 print(f"  -> 12시간 내 발송 이력 있음. 건너뜀.")
@@ -1649,11 +1655,11 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                     "stock_product":      stock_product,
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
-                insight, guide = generate_ai_insight(alert_data)
+                insight, _ = generate_ai_insight(alert_data)
                 alert_data["ai_insight"]   = insight
-                alert_data["action_guide"] = guide
+                alert_data["action_guide"] = build_action_guide(alert_data, stock_info)
                 print(f"  AI: {insight}")
-                print(f"  가이드: {guide}")
+                print(f"  가이드: {alert_data['action_guide']}")
                 opp_alerts.append(alert_data)
             else:
                 print(f"  -> 12시간 내 발송 이력 있음. 건너뜀.")
