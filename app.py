@@ -210,10 +210,11 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         cursor = conn.cursor()
 
         # 재고 조회: color_cd 있으면 사이즈별, 없으면 컬러별
+        # 서브쿼리에 PART_CD도 포함 → 해당 상품 기준 최신 날짜 조회 (브랜드 최신 날짜와 다를 수 있음)
         latest_dt_sub = f"""
             SELECT MAX(START_DT)
             FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
-            WHERE BRD_CD = %s
+            WHERE BRD_CD = %s AND PART_CD = %s
         """
         if color_cd:
             # 단일 컬러 → 사이즈별 물류재고
@@ -228,7 +229,7 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
                   AND d.START_DT = ({latest_dt_sub})
                 GROUP BY d.SIZE_CD
-            """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD))
+            """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD, part_cd))
         else:
             # 전체 컬러 → 컬러별 물류재고 합산
             cursor.execute(f"""
@@ -243,7 +244,7 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
                   AND d.START_DT = ({latest_dt_sub})
                 GROUP BY d.COLOR_CD
                 ORDER BY WH_STOCK DESC
-            """, (STOCK_BRAND_CD, part_cd, STOCK_BRAND_CD))
+            """, (STOCK_BRAND_CD, part_cd, STOCK_BRAND_CD, part_cd))
         stock_rows = cursor.fetchall()
 
         # 최근 7일 자사몰(온라인쇼핑몰 직영) 판매량 (DW_SH_SCS_D, SHOP_ID=자사몰)
