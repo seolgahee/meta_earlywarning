@@ -309,6 +309,18 @@ def _stock_items(stock_info_item):
     return stock_info_item.get("sizes") or stock_info_item.get("colors") or []
 
 
+def _status_badge_info(dos, total_wh):
+    """(상태 텍스트, 배경색) 반환."""
+    if total_wh == 0:
+        return "즉시", "#c0392b"
+    elif dos is not None and dos < 7:
+        return "긴급", "#e74c3c"
+    elif dos is not None and dos < 14:
+        return "주의", "#f39c12"
+    else:
+        return "안정", "#27ae60"
+
+
 def _format_color_breakdown(item) -> str:
     """컬러별 물류재고 한줄 포맷: WHS 50개 / INL 30개 / ..."""
     colors = item.get("colors", [])
@@ -434,6 +446,192 @@ def format_stock_md_guide(stock_info) -> str:
         action += f" | {', '.join(zero_wh_sizes)} 물류창고 재고 없음 주의"
 
     return f"{size_line}\n{action}"
+
+
+def build_stock_html(stock_info) -> str:
+    """재고 현황 + MD 액션 가이드를 HTML 테이블로 반환."""
+    if not stock_info:
+        return ""
+
+    # ── 공통 스타일 ──
+    TH_GREEN = (
+        'style="padding:6px 10px;border:1px solid #c8e6c9;background:#e8f5e9;'
+        'text-align:left;font-size:12px;color:#2e7d32;white-space:nowrap;"'
+    )
+    TH_GREEN_R = (
+        'style="padding:6px 10px;border:1px solid #c8e6c9;background:#e8f5e9;'
+        'text-align:right;font-size:12px;color:#2e7d32;white-space:nowrap;"'
+    )
+    TD_G  = 'style="padding:6px 10px;border:1px solid #c8e6c9;font-size:13px;color:#333;"'
+    TD_GR = 'style="padding:6px 10px;border:1px solid #c8e6c9;font-size:13px;color:#333;text-align:right;"'
+    ROW_ALT_G = 'style="background:#f9fbe7;"'
+
+    TH_ORG = (
+        'style="padding:6px 10px;border:1px solid #ffe0b2;background:#fff3e0;'
+        'text-align:left;font-size:12px;color:#e65100;white-space:nowrap;"'
+    )
+    TH_ORG_C = (
+        'style="padding:6px 10px;border:1px solid #ffe0b2;background:#fff3e0;'
+        'text-align:center;font-size:12px;color:#e65100;white-space:nowrap;"'
+    )
+    TH_ORG_R = (
+        'style="padding:6px 10px;border:1px solid #ffe0b2;background:#fff3e0;'
+        'text-align:right;font-size:12px;color:#e65100;white-space:nowrap;"'
+    )
+    TD_O  = 'style="padding:6px 10px;border:1px solid #ffe0b2;font-size:12px;color:#333;"'
+    TD_OC = 'style="padding:6px 10px;border:1px solid #ffe0b2;font-size:12px;color:#333;text-align:center;"'
+    TD_OR = 'style="padding:6px 10px;border:1px solid #ffe0b2;font-size:12px;color:#333;text-align:right;"'
+    ROW_ALT_O = 'style="background:#fff8f0;"'
+
+    def _action_text(total_wh, total_all, dos):
+        if total_wh == 0:
+            return f"물류창고 재고 없음 (매장 {total_all:,}개) → 즉시 물류 이동 필요"
+        elif dos is not None and dos < 7:
+            return "광고 전환 증가 예상 → 자사몰 물류 즉시 보충 필수"
+        elif dos is not None and dos < 14:
+            return "2주 내 소진 예상 → 자사몰 물류 이동 검토"
+        else:
+            return "광고 지속 운영 가능"
+
+    def _badge(status, color):
+        return (
+            f'<span style="background:{color};color:#fff;padding:2px 8px;'
+            f'border-radius:3px;font-size:11px;font-weight:bold;">{status}</span>'
+        )
+
+    # ── 재고 현황 테이블 ──
+    if isinstance(stock_info, list):
+        stock_rows = ""
+        for i, s in enumerate(stock_info):
+            nm = s.get("prdt_nm", "?") or "?"
+            bg = ROW_ALT_G if i % 2 == 1 else ""
+            if s.get("colors") is not None:
+                total_wh  = sum(c["wh"]    for c in s["colors"])
+                breakdown = " / ".join(f'{c["color"]} {c["wh"]:,}' for c in s["colors"] if c["wh"] > 0) or "재고 없음"
+            else:
+                szs      = _stock_items(s)
+                total_wh = sum(sz["wh"] for sz in szs)
+                breakdown = " / ".join(f'{sz["size"]} {sz["wh"]:,}' for sz in szs if sz["wh"] > 0) or "재고 없음"
+            stock_rows += (
+                f'<tr {bg}>'
+                f'<td {TD_G}>{nm}</td>'
+                f'<td {TD_G}>{breakdown}</td>'
+                f'<td {TD_GR}>{total_wh:,}개</td>'
+                f'</tr>'
+            )
+        stock_table = (
+            '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+            f'<thead><tr><th {TH_GREEN}>상품명</th><th {TH_GREEN}>컬러/사이즈별 물류재고</th><th {TH_GREEN_R}>합계</th></tr></thead>'
+            f'<tbody>{stock_rows}</tbody></table>'
+        )
+    elif stock_info.get("colors") is not None:
+        colors = stock_info["colors"]
+        stock_rows = ""
+        for i, c in enumerate(colors):
+            bg = ROW_ALT_G if i % 2 == 1 else ""
+            stock_rows += (
+                f'<tr {bg}>'
+                f'<td {TD_G}>{c["color"]}</td>'
+                f'<td {TD_GR}>{c["wh"]:,}개</td>'
+                f'<td {TD_GR}>{c["total"]:,}개</td>'
+                f'</tr>'
+            )
+        stock_table = (
+            '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+            f'<thead><tr><th {TH_GREEN}>컬러</th><th {TH_GREEN_R}>물류재고</th><th {TH_GREEN_R}>전체재고</th></tr></thead>'
+            f'<tbody>{stock_rows}</tbody></table>'
+        )
+    else:
+        sizes = _stock_items(stock_info)
+        stock_rows = ""
+        for i, s in enumerate(sizes):
+            bg = ROW_ALT_G if i % 2 == 1 else ""
+            stock_rows += (
+                f'<tr {bg}>'
+                f'<td {TD_G}>{s["size"]}</td>'
+                f'<td {TD_GR}>{s["wh"]:,}개</td>'
+                f'<td {TD_GR}>{s["total"]:,}개</td>'
+                f'</tr>'
+            )
+        stock_table = (
+            '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+            f'<thead><tr><th {TH_GREEN}>사이즈</th><th {TH_GREEN_R}>물류재고</th><th {TH_GREEN_R}>전체재고</th></tr></thead>'
+            f'<tbody>{stock_rows}</tbody></table>'
+        )
+
+    # ── MD 액션 가이드 테이블 ──
+    md_header = (
+        f'<thead><tr>'
+        f'<th {TH_ORG}>상품명</th>'
+        f'<th {TH_ORG_C}>상태</th>'
+        f'<th {TH_ORG_R}>재고일수</th>'
+        f'<th {TH_ORG_R}>7일 판매</th>'
+        f'<th {TH_ORG_R}>일평균</th>'
+        f'<th {TH_ORG}>액션</th>'
+        f'</tr></thead>'
+    )
+
+    def _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg):
+        status, color = _status_badge_info(dos, total_wh)
+        dos_str  = f"~{int(dos)}일" if dos else "-"
+        sale_str = f"{int(sale_7d):,}개"  if sale_7d  else "-"
+        avg_str  = f"{daily_avg:.1f}개"   if daily_avg else "-"
+        action   = _action_text(total_wh, total_all, dos)
+        return (
+            f'<tr {bg}>'
+            f'<td {TD_O}>{nm}</td>'
+            f'<td {TD_OC}>{_badge(status, color)}</td>'
+            f'<td {TD_OR}>{dos_str}</td>'
+            f'<td {TD_OR}>{sale_str}</td>'
+            f'<td {TD_OR}>{avg_str}</td>'
+            f'<td {TD_O}>{action}</td>'
+            f'</tr>'
+        )
+
+    if isinstance(stock_info, list):
+        md_rows = ""
+        for i, s in enumerate(stock_info):
+            nm        = s.get("prdt_nm", "?") or "?"
+            dos       = s.get("days_of_supply")
+            sale_7d   = s.get("sale_7d", 0)
+            daily_avg = s.get("daily_avg", 0)
+            if s.get("colors") is not None:
+                total_wh  = sum(c["wh"]    for c in s["colors"])
+                total_all = sum(c["total"] for c in s["colors"])
+            else:
+                szs       = _stock_items(s)
+                total_wh  = sum(sz["wh"]    for sz in szs)
+                total_all = sum(sz["total"] for sz in szs)
+            bg = ROW_ALT_O if i % 2 == 1 else ""
+            md_rows += _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg)
+    else:
+        dos       = stock_info.get("days_of_supply")
+        sale_7d   = stock_info.get("sale_7d", 0)
+        daily_avg = stock_info.get("daily_avg", 0)
+        nm        = stock_info.get("prdt_nm", "") or ""
+        if stock_info.get("colors") is not None:
+            total_wh  = sum(c["wh"]    for c in stock_info["colors"])
+            total_all = sum(c["total"] for c in stock_info["colors"])
+        else:
+            szs       = _stock_items(stock_info)
+            total_wh  = sum(sz["wh"]    for sz in szs)
+            total_all = sum(sz["total"] for sz in szs)
+        md_rows = _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, "")
+
+    md_table = (
+        '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+        f'{md_header}<tbody>{md_rows}</tbody></table>'
+    )
+
+    return (
+        '<div style="margin-top:12px;padding:12px;background:#f1f8e9;'
+        'border-left:4px solid #558b2f;border-radius:4px;">'
+        '<p style="margin:0 0 8px;font-size:11px;color:#2e7d32;font-weight:bold;">📦 재고 현황</p>'
+        + stock_table +
+        '<p style="margin:14px 0 8px;font-size:11px;color:#e65100;font-weight:bold;">MD 액션 가이드</p>'
+        + md_table +
+        '</div>'
+    )
 
 
 def detect_channel(campaign_name: str, adset_name: str) -> str:
@@ -1030,17 +1228,7 @@ def build_email_html(alerts: list) -> str:
             <p style="margin:0 0 4px;font-size:11px;color:#888;font-weight:bold;">액션 가이드</p>
             <p style="margin:0;font-size:13px;color:#333;">{a['action_guide']}</p>
           </div>
-          {(
-              '<div style="margin-top:12px;padding:12px;background:#f1f8e9;border-left:4px solid #558b2f;border-radius:4px;">'
-              f'<p style="margin:0 0 4px;font-size:11px;color:#558b2f;font-weight:bold;">📦 재고 현황 ({a.get("stock_product","")})</p>'
-              f'<p style="margin:0 0 6px;font-size:13px;color:#333;">{a.get("stock_summary","")}</p>'
-              + (
-                  '<p style="margin:6px 0 2px;font-size:11px;color:#888;font-weight:bold;">MD 액션 가이드</p>'
-                  f'<p style="margin:0;font-size:13px;color:#333;white-space:pre-line;">{a.get("stock_md_guide","")}</p>'
-                  if a.get("stock_md_guide") else ""
-              ) +
-              '</div>'
-          ) if a.get("stock_product") else ""}
+          {build_stock_html(a.get("stock_info")) if a.get("stock_product") else ""}
         </div>
         """
 
