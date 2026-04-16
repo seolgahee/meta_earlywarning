@@ -367,16 +367,16 @@ def format_stock_md_guide(stock_info) -> str:
         return ""
     # 멀티 상품 리스트인 경우 상품별 컬러/재고 + 액션 가이드
     def _action(total_wh, total_all, dos, sale_7d, daily_avg):
-        sale_info = f"자사몰 최근 7일 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
+        sale_info = f"자사몰 최근 7일 판매 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
         if total_wh == 0:
             return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요"
         elif dos is not None and dos < 7:
-            return f"[긴급] ~{int(dos)}일치 · {sale_info} → 광고 전환 증가 예상, 자사몰 물류 즉시 보충 필수"
+            return f"[긴급] ~{int(dos)}일치, {sale_info} → 광고 전환 증가 예상, 자사몰 물류 즉시 보충 필수"
         elif dos is not None and dos < 14:
-            return f"[주의] ~{int(dos)}일치 · {sale_info} → 전환 지속 시 2주 내 소진 예상, 자사몰로 물류 이동 검토"
+            return f"[주의] ~{int(dos)}일치, {sale_info} → 전환 지속 시 2주 내 소진 예상, 자사몰로 물류 이동 검토"
         else:
             dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
-            return f"[안정] {dos_str} · {sale_info} → 광고 지속 운영 가능"
+            return f"[안정] {dos_str}, {sale_info} → 광고 지속 운영 가능"
 
     if isinstance(stock_info, list):
         lines = []
@@ -386,18 +386,17 @@ def format_stock_md_guide(stock_info) -> str:
             sale_7d   = s.get("sale_7d", 0)
             daily_avg = s.get("daily_avg", 0)
             if s.get("colors") is not None:
-                color_line = _format_color_breakdown(s)
                 total_wh   = sum(c["wh"] for c in s["colors"])
                 total_all  = sum(c["total"] for c in s["colors"])
                 action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
-                lines.append(f"{nm}: {color_line}\n{action}")
+                lines.append(f"{nm}: {action}")
             else:
                 szs       = _stock_items(s)
                 total_wh  = sum(sz["wh"] for sz in szs)
                 total_all = sum(sz["total"] for sz in szs)
                 action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
-                lines.append(f"{nm}: 온라인 물류창고 {total_wh}개\n{action}")
-        return "\n\n".join(lines)
+                lines.append(f"{nm}: {action}")
+        return "\n".join(lines)
 
     items    = _stock_items(stock_info)
     total_wh = sum(s["wh"] for s in items)
@@ -405,12 +404,11 @@ def format_stock_md_guide(stock_info) -> str:
     sale_7d   = stock_info.get("sale_7d", 0)
     daily_avg = stock_info.get("daily_avg", 0)
 
-    # 컬러별 데이터인 경우 (color_cd 없이 조회된 단일 상품)
+    # 컬러별 데이터인 경우 (color_cd 없이 조회된 단일 상품) — 색상별 재고는 재고 현황에 표시되므로 액션만 출력
     if stock_info.get("colors") is not None:
-        color_line = _format_color_breakdown(stock_info)
         total_all  = sum(c["total"] for c in stock_info["colors"])
         action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
-        return f"{color_line}\n{action}"
+        return action
 
     sizes = items
     size_line = " / ".join(
@@ -618,14 +616,11 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
     alert_subtype = alert.get("alert_subtype", "DEFAULT")
     fallback      = FALLBACK.get(alert_subtype, FALLBACK["DEFAULT"])
 
-    is_partnership = "파트너십" in alert.get("adset_name", "")
+    _ad_name       = alert.get("ad_name", "")
+    is_partnership = "파트너십" in _ad_name or "파트너쉽" in _ad_name
+    is_influencer  = "인플루언서" in _ad_name and not is_partnership
 
     if not _gemini_client:
-        if is_partnership:
-            return (
-                fallback[0],
-                "해당 인플루언서 소재의 반응이 좋습니다. 해당 인플루언서의 또 다른 소재 추가를 제안하며, ASC 캠페인 일cap 상향으로 노출을 증대하세요.",
-            )
         return fallback
 
     is_br = alert.get("alert_type") == "BR"
@@ -642,7 +637,9 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
         "BR_CTR_DROP":          "브랜딩 소재의 CTR이 하락한 이유를 소재 피로도·노출 포화 관점에서 해석하세요. 전환 지표는 언급하지 마세요.",
     }
     if is_partnership:
-        subtype_context = {k: "인플루언서가 게재한 파트너십 소재의 반응이 좋아진 이유를 소재 특성·타겟 공감 관점에서 해석하세요." for k in subtype_context}
+        subtype_context = {k: "파트너십 소재(인플루언서가 직접 게재한 협찬 콘텐츠)의 반응이 좋아진 이유를 소재 특성·타겟 공감 관점에서 해석하세요." for k in subtype_context}
+    elif is_influencer:
+        subtype_context = {k: "인플루언서컷을 활용해 제작한 광고 소재의 반응이 좋아진 이유를 소재 특성·비주얼 몰입도 관점에서 해석하세요." for k in subtype_context}
 
     if is_br:
         prompt = f"""
@@ -720,7 +717,9 @@ def build_action_guide(alert: dict, stock_info) -> str:
     """
     alert_subtype  = alert.get("alert_subtype", "DEFAULT")
     action_type    = alert.get("action_type", "")
-    is_partnership = "파트너십" in alert.get("adset_name", "")
+    ad_name        = alert.get("ad_name", "")
+    is_partnership = "파트너십" in ad_name or "파트너쉽" in ad_name
+    is_influencer  = "인플루언서" in ad_name and not is_partnership
     is_br          = alert.get("alert_type") == "BR"
 
     # ── ① 재고 경고 ──
@@ -743,7 +742,9 @@ def build_action_guide(alert: dict, stock_info) -> str:
         else:
             creative_action = "반응 좋은 소재 컨셉 기반 유사 소재 2~3종 추가 제작"
     elif is_partnership:
-        creative_action = "해당 인플루언서 소재 추가 확장"
+        creative_action = "해당 파트너십 소재 추가 확장"
+    elif is_influencer:
+        creative_action = "인플루언서 소재 추가 제작"
     else:
         if alert_subtype in ("CLICK_SURGE", "CLICK_TO_CONVERT_GAP"):
             creative_action = "랜딩 페이지·상품 상세 점검 및 전환 유도형 카피/오퍼 변형 테스트"
