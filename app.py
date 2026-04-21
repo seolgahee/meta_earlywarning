@@ -19,6 +19,8 @@ import requests
 import pandas as pd
 from dotenv import load_dotenv
 import snowflake.connector
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, Encoding, PrivateFormat, NoEncryption
 from google import genai
 
 load_dotenv()
@@ -30,10 +32,11 @@ ACCESS_TOKEN  = os.getenv("META_ACCESS_TOKEN")
 AD_ACCOUNT_ID = os.getenv("META_AD_ACCOUNT_ID")
 API_VERSION   = os.getenv("META_API_VERSION", "v19.0")
 
-SNOWFLAKE_ACCOUNT   = os.getenv("SNOWFLAKE_ACCOUNT")
-SNOWFLAKE_USER      = os.getenv("SNOWFLAKE_USER")
-SNOWFLAKE_PASSWORD  = os.getenv("SNOWFLAKE_PASSWORD")
-SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
+SNOWFLAKE_ACCOUNT         = os.getenv("SNOWFLAKE_ACCOUNT")
+SNOWFLAKE_USER            = os.getenv("SNOWFLAKE_USER")
+SNOWFLAKE_PRIVATE_KEY     = os.getenv("SNOWFLAKE_PRIVATE_KEY")
+SNOWFLAKE_PRIVATE_KEY_PATH = os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
+SNOWFLAKE_WAREHOUSE   = os.getenv("SNOWFLAKE_WAREHOUSE")
 SNOWFLAKE_DATABASE  = os.getenv("SNOWFLAKE_DATABASE")
 SNOWFLAKE_SCHEMA    = os.getenv("SNOWFLAKE_SCHEMA")
 SNOWFLAKE_ROLE      = os.getenv("SNOWFLAKE_ROLE", "PU_PF")
@@ -203,7 +206,7 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
     }
     실패 시 None.
     """
-    if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD]):
+    if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, (SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH)]):
         return None
     try:
         conn = get_snowflake_conn()
@@ -1552,11 +1555,27 @@ def build_dataframe(raw_data: list) -> pd.DataFrame:
 # ─────────────────────────────────────────
 # Snowflake
 # ─────────────────────────────────────────
+def _get_private_key_bytes() -> bytes:
+    if SNOWFLAKE_PRIVATE_KEY_PATH:
+        with open(SNOWFLAKE_PRIVATE_KEY_PATH, "rb") as f:
+            pem = f.read()
+    elif SNOWFLAKE_PRIVATE_KEY:
+        pem = SNOWFLAKE_PRIVATE_KEY.replace("\\n", "\n").encode()
+    else:
+        raise ValueError("SNOWFLAKE_PRIVATE_KEY 또는 SNOWFLAKE_PRIVATE_KEY_PATH 중 하나를 설정하세요.")
+    key = load_pem_private_key(pem, password=None, backend=default_backend())
+    return key.private_bytes(
+        encoding=Encoding.DER,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )
+
+
 def get_snowflake_conn():
     return snowflake.connector.connect(
         account=SNOWFLAKE_ACCOUNT,
         user=SNOWFLAKE_USER,
-        password=SNOWFLAKE_PASSWORD,
+        private_key=_get_private_key_bytes(),
         warehouse=SNOWFLAKE_WAREHOUSE,
         database=SNOWFLAKE_DATABASE,
         schema=SNOWFLAKE_SCHEMA,
@@ -1565,7 +1584,7 @@ def get_snowflake_conn():
 
 
 def load_to_snowflake(df: pd.DataFrame) -> None:
-    required = [SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD,
+    required = [SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, (SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH),
                 SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA]
     if not all(required):
         print("[경고] Snowflake 환경변수 누락 - 적재 건너뜀")
@@ -1599,7 +1618,7 @@ def load_to_snowflake(df: pd.DataFrame) -> None:
 # Alert 판단
 # ─────────────────────────────────────────
 def evaluate_alerts(df_now: pd.DataFrame) -> None:
-    required = [SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD,
+    required = [SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, (SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH),
                 SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA]
     if not all(required):
         return
