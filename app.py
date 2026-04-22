@@ -954,8 +954,9 @@ def build_action_guide(alert: dict, stock_info) -> str:
 
     # ── ③ 일cap 상향 여부 ──
     cap_action = ""
+    no_stock = (total_wh == 0) if (stock_info and not isinstance(stock_info, list)) else False
     if not is_br:
-        if total_wh == 0 if stock_info and not isinstance(stock_info, list) else False:
+        if no_stock:
             cap_action = ""  # 재고 없으면 일cap 상향 보류
         elif alert_subtype == "CONVERSION_SURGE_COLD":
             cap_action = "다음 6h 추이 관찰 후 일cap 상향 검토"
@@ -964,8 +965,16 @@ def build_action_guide(alert: dict, stock_info) -> str:
         elif action_type in ("CAMPAIGN_SCALE", "CONVERSION_SURGE", "CONVERSION_EARLY"):
             cap_action = "소재 일cap 상향"
 
+    # ── ④ 재고 소진·긴급 시 광고 OFF ──
+    stock_urgent = no_stock or (
+        stock_info and not isinstance(stock_info, list)
+        and stock_info.get("days_of_supply") is not None
+        and stock_info["days_of_supply"] < 7
+    )
+    off_action = "광고 OFF 검토" if stock_urgent else ""
+
     # ── 조합 ──
-    actions = [a for a in [creative_action, cap_action] if a]
+    actions = [a for a in [creative_action, cap_action, off_action] if a]
     action_line = " / ".join(f"{'①②③'[i]} {a}" for i, a in enumerate(actions))
 
     if stock_warn:
