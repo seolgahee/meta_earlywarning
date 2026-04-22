@@ -818,7 +818,7 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
     fallback      = FALLBACK.get(alert_subtype, FALLBACK["DEFAULT"])
 
     _ad_name       = alert.get("ad_name", "")
-    is_partnership = "파트너십" in _ad_name or "파트너쉽" in _ad_name
+    is_partnership = "partner" in _ad_name.lower()
     is_influencer  = "인플루언서" in _ad_name and not is_partnership
 
     if not _gemini_client:
@@ -919,7 +919,7 @@ def build_action_guide(alert: dict, stock_info) -> str:
     alert_subtype  = alert.get("alert_subtype", "DEFAULT")
     action_type    = alert.get("action_type", "")
     ad_name        = alert.get("ad_name", "")
-    is_partnership = "파트너십" in ad_name or "파트너쉽" in ad_name
+    is_partnership = "partner" in ad_name.lower()
     is_influencer  = "인플루언서" in ad_name and not is_partnership
     is_br          = alert.get("alert_type") == "BR"
 
@@ -962,7 +962,7 @@ def build_action_guide(alert: dict, stock_info) -> str:
         elif alert_subtype in ("CLICK_SURGE", "CLICK_TO_CONVERT_GAP"):
             cap_action = ""  # 전환 없거나 갭 있으면 보류
         elif action_type in ("CAMPAIGN_SCALE", "CONVERSION_SURGE", "CONVERSION_EARLY"):
-            cap_action = "ASC 캠페인 일cap 상향"
+            cap_action = "소재 일cap 상향"
 
     # ── 조합 ──
     actions = [a for a in [creative_action, cap_action] if a]
