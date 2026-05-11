@@ -183,8 +183,8 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
         if len(parts) == 2:
             return [(parts[0], parts[1])]
 
-    # 품번만 있는 패턴: _로 구분된 영문4자+숫자4~5자 형태
-    codes = re.findall(r'(?:^|_)([A-Z]{4}\d{4,5}[A-Z0-9]{0,2})(?=_|$)', ad_name)
+    # 품번만 있는 패턴: _ 또는 -로 구분된 영문4자+숫자4~5자 형태
+    codes = re.findall(r'(?:^|[_-])([A-Z]{4}\d{4,5}[A-Z0-9]{0,2})(?=[_-]|$)', ad_name)
     if codes:
         return [(c, None) for c in codes]
 
