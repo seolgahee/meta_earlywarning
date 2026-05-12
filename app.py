@@ -58,7 +58,8 @@ ALERT_LOG_FILE = "alert_sent_log.json"
 
 SNOWFLAKE_STOCK_SCHEMA = os.getenv("SNOWFLAKE_STOCK_SCHEMA", "PRCS")
 STOCK_BRAND_CD         = os.getenv("STOCK_BRAND_CD", "ST")
-JASAMOL_SHOP_ID        = os.getenv("JASAMOL_SHOP_ID", "30001")  # 온라인쇼핑몰(직) = 자사몰
+JASAMOL_SHOP_ID        = os.getenv("JASAMOL_SHOP_ID", "30001")           # 온라인쇼핑몰(직) = 자사몰
+EC_LOGISTICS_SHOP_ID   = os.getenv("EC_LOGISTICS_SHOP_ID", "90002")      # EC-온라인물류 (DB_SH_SCS_STOCK 기준 온라인재고)
 
 if not ACCESS_TOKEN or not AD_ACCOUNT_ID:
     print("[오류] .env에 META_ACCESS_TOKEN, META_AD_ACCOUNT_ID 값이 없습니다.")
@@ -194,15 +195,19 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
 
 
-def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
+def fetch_stock_info(part_cd: str, color_cd: str, ec_logistics_shop_id: str = EC_LOGISTICS_SHOP_ID) -> dict | None:
     """
-    DW_SCS_DACUM(물류재고) + DW_SCS_D(금주 온라인 판매) 기반 재고/주치 조회.
+    DB_SH_SCS_STOCK(EC 기준 단일 스냅샷 재고) + DW_SH_SCS_D(금주 자사몰 판매) 기반 재고/주치 조회.
+    - 온라인재고(wh): EC물류 SHOP_ID만 합산
+    - 전체재고(total): EC물류 SHOP + F4(외부몰) 합산
+    - 재고 컬럼: AVAILABLE_STK_STOCK_QTY (ST에서 실재 재고가 채워진 컬럼)
+
     반환: {
         "prdt_nm": "W 하이웨이스트 우븐 플리츠 스커트",
         "is_mc": False,
         "sizes": [{"size": "M", "wh": 5, "total": 12}, ...],
         "weekly_qty": 8,
-        "weeks_of_supply": 1.2,   # 물류재고합 / 금주판매량, None이면 판매 없음
+        "weeks_of_supply": 1.2,
     }
     실패 시 None.
     """
@@ -212,42 +217,53 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
         conn = get_snowflake_conn()
         cursor = conn.cursor()
 
-        # 재고 조회: color_cd 있으면 사이즈별, 없으면 컬러별
-        # 서브쿼리에 PART_CD도 포함 → 해당 상품 기준 최신 날짜 조회 (브랜드 최신 날짜와 다를 수 있음)
+        # 해당 상품 기준 최신 스냅샷 날짜 (브랜드 최신과 다를 수 있음)
         latest_dt_sub = f"""
-            SELECT MAX(START_DT)
-            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
-            WHERE BRD_CD = %s AND PART_CD = %s
+            SELECT MAX(DT)
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK
+            WHERE BRD_CD = %s AND PART_CD = %s AND DT <= CURRENT_DATE
         """
         if color_cd:
-            # 단일 컬러 → 사이즈별 물류재고
+            # 단일 컬러 → 사이즈별 (EC 온라인재고 / 전체재고)
             cursor.execute(f"""
                 SELECT d.SIZE_CD,
-                       SUM(d.WH_STOCK_QTY) AS WH_STOCK,
-                       SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
-                       MAX(p.PRDT_NM)      AS PRDT_NM
-                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STK_STOCK_QTY ELSE 0 END) AS WH_STOCK,
+                       SUM(d.AVAILABLE_STK_STOCK_QTY) AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM) AS PRDT_NM
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK d
+                LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP sh
+                  ON d.BRD_CD = sh.BRD_CD AND d.SHOP_ID = sh.SHOP_ID
                 LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
-                  AND d.START_DT = ({latest_dt_sub})
+                  AND d.DT = ({latest_dt_sub})
+                  AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD = 'F4')
                 GROUP BY d.SIZE_CD
-            """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD, part_cd))
+            """, (ec_logistics_shop_id,
+                  STOCK_BRAND_CD, part_cd, color_cd,
+                  STOCK_BRAND_CD, part_cd,
+                  ec_logistics_shop_id))
         else:
-            # 전체 컬러 → 컬러별 물류재고 합산
+            # 전체 컬러 → 컬러별 합산
             cursor.execute(f"""
                 SELECT d.COLOR_CD,
-                       SUM(d.WH_STOCK_QTY) AS WH_STOCK,
-                       SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
-                       MAX(p.PRDT_NM)      AS PRDT_NM
-                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STK_STOCK_QTY ELSE 0 END) AS WH_STOCK,
+                       SUM(d.AVAILABLE_STK_STOCK_QTY) AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM) AS PRDT_NM
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK d
+                LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP sh
+                  ON d.BRD_CD = sh.BRD_CD AND d.SHOP_ID = sh.SHOP_ID
                 LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s
-                  AND d.START_DT = ({latest_dt_sub})
+                  AND d.DT = ({latest_dt_sub})
+                  AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD = 'F4')
                 GROUP BY d.COLOR_CD
                 ORDER BY WH_STOCK DESC
-            """, (STOCK_BRAND_CD, part_cd, STOCK_BRAND_CD, part_cd))
+            """, (ec_logistics_shop_id,
+                  STOCK_BRAND_CD, part_cd,
+                  STOCK_BRAND_CD, part_cd,
+                  ec_logistics_shop_id))
         stock_rows = cursor.fetchall()
 
         # 최근 7일 자사몰(온라인쇼핑몰 직영) 판매량 (DW_SH_SCS_D, SHOP_ID=자사몰)
@@ -1830,7 +1846,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
 
                 stock_items = []
                 for pc, cc in product_codes:
-                    info = fetch_stock_info(pc, cc)
+                    info = fetch_stock_info(pc, cc, EC_LOGISTICS_SHOP_ID)
                     if info:
                         stock_items.append(info)
                     else:

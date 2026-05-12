@@ -70,8 +70,14 @@ roas_12h <= 120% AND spend_12h >= 150,000원
 - **적재 테이블**: `FNF.ORG_PF.META_AD_SNAPSHOT`
 - **조회 방식**: 현재 스냅샷에서 6h/12h 전 스냅샷의 누적값을 빼서 델타 계산
 - **브랜드 필터**: `WHERE brand = 'SERGIO_TACCHINI'`
-- **재고 조회**: `FNF.PRCS.DW_SCS_DACUM` (물류재고), `FNF.PRCS.DW_SH_SCS_D` (자사몰 판매)
+- **재고 조회**: `FNF.PRCS.DB_SH_SCS_STOCK` (EC 기준 단일 스냅샷), `FNF.PRCS.DW_SH_SCS_D` (자사몰 판매)
+  - 재고 컬럼: `AVAILABLE_STK_STOCK_QTY` (ST는 `AVAILABLE_STOCK_QTY`가 전 행 0 → STK 컬럼 사용)
+  - 온라인재고(wh): EC-온라인물류 SHOP만 합산
+  - 전체재고(total): EC-온라인물류 SHOP + `DB_SHOP.ANLYS_DIST_TYPE_CD = 'F4'`(외부몰) 합산
+  - 최신 스냅샷: `MAX(DT) WHERE DT <= CURRENT_DATE`
 - **재고 브랜드 코드**: `ST`
+- **EC-온라인물류 SHOP_ID**: `90002` (`EC_LOGISTICS_SHOP_ID`)
+- **자사몰 SHOP_ID**: `30001` (`JASAMOL_SHOP_ID`, 판매 집계용)
 
 ---
 
