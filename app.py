@@ -199,7 +199,7 @@ def fetch_stock_info(part_cd: str, color_cd: str, ec_logistics_shop_id: str = EC
     """
     DB_SH_SCS_STOCK(EC 기준 단일 스냅샷 재고) + DW_SH_SCS_D(금주 자사몰 판매) 기반 재고/주치 조회.
     - 온라인재고(wh): EC물류 SHOP_ID만 합산
-    - 전체재고(total): EC물류 SHOP + F4(외부몰) 합산
+    - 전체재고(total): EC물류 SHOP + 오프라인 매장(AX/AS/S2/S1) 합산
     - 재고 컬럼: AVAILABLE_STK_STOCK_QTY (ST에서 실재 재고가 채워진 컬럼)
 
     반환: {
@@ -237,7 +237,7 @@ def fetch_stock_info(part_cd: str, color_cd: str, ec_logistics_shop_id: str = EC
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
                   AND d.DT = ({latest_dt_sub})
-                  AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD = 'F4')
+                  AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD IN ('AX','AS','S2','S1'))
                 GROUP BY d.SIZE_CD
             """, (ec_logistics_shop_id,
                   STOCK_BRAND_CD, part_cd, color_cd,
@@ -257,7 +257,7 @@ def fetch_stock_info(part_cd: str, color_cd: str, ec_logistics_shop_id: str = EC
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s
                   AND d.DT = ({latest_dt_sub})
-                  AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD = 'F4')
+                  AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD IN ('AX','AS','S2','S1'))
                 GROUP BY d.COLOR_CD
                 ORDER BY WH_STOCK DESC
             """, (ec_logistics_shop_id,
