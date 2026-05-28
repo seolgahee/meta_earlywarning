@@ -1733,6 +1733,10 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
 
     for _, row in df_now.iterrows():
         ad_info          = f"[{row.get('CHANNEL','OFFICIAL')}] {row['AD_NAME']} (ad_id: {row['AD_ID']})"
+
+        if "카탈로그" in str(row.get("AD_NAME", "")):
+            continue
+
         campaign_tokens  = re.split(r'[\s_\-|/]+', str(row.get("CAMPAIGN_NAME", "")))
         is_br_campaign   = "BR" in [t.upper() for t in campaign_tokens]
 
