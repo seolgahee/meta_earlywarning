@@ -1447,18 +1447,21 @@ def send_slack_alert(alerts: list) -> None:
 # ─────────────────────────────────────────
 # Meta API 호출
 # ─────────────────────────────────────────
-def fetch_creative_image(ad_id: str) -> str:
+def fetch_creative_image(ad_id: str, ad_name: str = "") -> str:
     """
-    ad_id 기준으로 소재 이미지 URL 반환.
-    우선순위: thumbnail_url > image_url > image_hash → adimages API
-    조회 실패 또는 이미지 없으면 빈 문자열 반환.
+    ad_id 기준으로 소재 이미지/포스팅 URL 반환.
+    - 파트너십 소재(ad_name에 'partner'): creative_id로 instagram_permalink_url 우선,
+      없으면 object_story_id({page_id}_{post_id})를 분해해 facebook posts URL 생성
+    - 일반 소재: image_url > thumbnail_url > image_hash → adimages
     """
+    is_partnership = "partner" in (ad_name or "").lower()
+
     try:
         resp = requests.get(
             f"https://graph.facebook.com/{API_VERSION}/{ad_id}",
             params={
                 "access_token": ACCESS_TOKEN,
-                "fields": "creative{thumbnail_url,image_url,image_hash,object_story_id}",
+                "fields": "creative{id,thumbnail_url,image_url,image_hash}",
             },
             timeout=10,
         )
@@ -1466,25 +1469,32 @@ def fetch_creative_image(ad_id: str) -> str:
             return ""
         creative = resp.json().get("creative", {})
 
+        # 파트너십 소재: creative_id로 인스타/페북 포스팅 URL 조회
+        if is_partnership:
+            creative_id = creative.get("id")
+            if creative_id:
+                cr_resp = requests.get(
+                    f"https://graph.facebook.com/{API_VERSION}/{creative_id}",
+                    params={
+                        "access_token": ACCESS_TOKEN,
+                        "fields": "instagram_permalink_url,object_story_id",
+                    },
+                    timeout=10,
+                )
+                if cr_resp.status_code == 200:
+                    data = cr_resp.json()
+                    ig_url = data.get("instagram_permalink_url")
+                    if ig_url:
+                        return ig_url
+                    story_id = data.get("object_story_id")
+                    if story_id and "_" in story_id:
+                        page_id, post_id = story_id.split("_", 1)
+                        return f"https://www.facebook.com/{page_id}/posts/{post_id}"
+            return ""
+
         # image_url이 원본 고화질이므로 최우선
         if creative.get("image_url"):
             return creative["image_url"]
-
-        # 파트너십(인플루언서) 소재: object_story_id로 인스타그램 포스팅 원본 이미지 조회
-        object_story_id = creative.get("object_story_id")
-        if object_story_id:
-            post_resp = requests.get(
-                f"https://graph.facebook.com/{API_VERSION}/{object_story_id}",
-                params={
-                    "access_token": ACCESS_TOKEN,
-                    "fields": "full_picture",
-                },
-                timeout=10,
-            )
-            if post_resp.status_code == 200:
-                full_picture = post_resp.json().get("full_picture")
-                if full_picture:
-                    return full_picture
 
         # fallback: thumbnail_url (저해상도 프리뷰)
         if creative.get("thumbnail_url"):
@@ -1762,7 +1772,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
 
             if not is_recently_alerted(row["AD_ID"]):
                 repeat_count       = get_repeat_count(row["AD_ID"])
-                creative_image_url = fetch_creative_image(row["AD_ID"])
+                creative_image_url = fetch_creative_image(row["AD_ID"], row["AD_NAME"])
                 br_alert_data = {
                     "alert_type":         "BR",
                     "action_type":        "BR",
@@ -1832,7 +1842,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                     row["clicks_prev_6h"], row["roas_prev_6h"],
                 )
                 print(f"  -> 소재 이미지 조회 중...")
-                creative_image_url = fetch_creative_image(row["AD_ID"])
+                creative_image_url = fetch_creative_image(row["AD_ID"], row["AD_NAME"])
                 if creative_image_url:
                     print(f"  -> 이미지 확보: {creative_image_url[:60]}...")
                 else:
